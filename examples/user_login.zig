@@ -8,7 +8,6 @@
 
 const std = @import("std");
 const tz = @import("tz");
-const tg = tz.types;
 const functions = @import("functions");
 
 // Quiet the per-packet debug logs so they don't interleave with the interactive

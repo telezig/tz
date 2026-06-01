@@ -1,7 +1,6 @@
 const std = @import("std");
 const types = @import("types");
 const functions = @import("functions");
-const client = @import("client.zig");
 
 pub const Context = @import("Context.zig");
 pub const Msg = @import("Msg.zig");

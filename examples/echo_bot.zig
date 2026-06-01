@@ -3,7 +3,6 @@
 
 const std = @import("std");
 const tz = @import("tz");
-const tg = tz.types;
 
 fn onNewMessage(msg: tz.Msg) !void {
     if (msg.text().len == 0) return;

@@ -494,7 +494,7 @@ pub fn Client(comptime handlers: []const Handler) type {
                 if (opt.ipv6.value != null) continue;
                 const addr = std.Io.net.IpAddress.parseIp4(opt.ip_address, @intCast(opt.port)) catch continue;
                 if (opt.cdn.value != null) {
-                    self.cdn_dcs.put(self.allocator, opt.id, addr) catch {};
+                    self.cdn_dcs.put(self.allocator, opt.id, addr) catch |e| std.log.debug("cdn_dcs.put: {}", .{e});
                     continue;
                 }
                 if (opt.media_only.value != null) continue;
@@ -705,7 +705,7 @@ pub fn Client(comptime handlers: []const Handler) type {
                         const now_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
                         const now_s: i64 = @intCast(@divTrunc(now_ns, std.time.ns_per_s));
                         const secs: i64 = @max(0, @as(i64, t.expires) - now_s);
-                        std.Io.sleep(io, std.Io.Duration.fromSeconds(secs), .awake) catch {};
+                        std.Io.sleep(io, std.Io.Duration.fromSeconds(secs), .awake) catch |e| std.log.debug("qr sleep: {}", .{e});
                     },
                     .AuthLoginTokenMigrateTo => |m| {
                         try self.importQrTokenViaDc(io, @intCast(m.dc_id), m.token);

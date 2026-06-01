@@ -40,15 +40,15 @@ fn onHelp(msg: tz.Msg) !void {
     try ft.plain(" — tz API demo\n\n");
     const cmds = &[_][2][]const u8{
         .{ "/echo <text>", "echo in bold" },
-        .{ "/fmt",         "formatting demo" },
-        .{ "/keyboard",    "inline keyboard" },
-        .{ "/document",    "send a file" },
-        .{ "/info",        "your user info" },
-        .{ "/react",       "add ❤ (reply to msg)" },
-        .{ "/unreact",     "clear reactions (reply)" },
-        .{ "/pin",         "pin a message (reply)" },
-        .{ "/unpin",       "unpin a message (reply)" },
-        .{ "/forward",     "forward to this chat (reply)" },
+        .{ "/fmt", "formatting demo" },
+        .{ "/keyboard", "inline keyboard" },
+        .{ "/document", "send a file" },
+        .{ "/info", "your user info" },
+        .{ "/react", "add ❤ (reply to msg)" },
+        .{ "/unreact", "clear reactions (reply)" },
+        .{ "/pin", "pin a message (reply)" },
+        .{ "/unpin", "unpin a message (reply)" },
+        .{ "/forward", "forward to this chat (reply)" },
     };
     for (cmds) |cmd| {
         try ft.code(cmd[0]);
@@ -129,9 +129,21 @@ fn onInfo(msg: tz.Msg) !void {
     const id_str = try std.fmt.allocPrint(msg.ctx.allocator, "id: {d}\n", .{user.id});
     defer msg.ctx.allocator.free(id_str);
     try ft.plain(id_str);
-    if (user.first_name.value) |n| { try ft.plain("first: "); try ft.plain(n); try ft.plain("\n"); }
-    if (user.last_name.value)  |n| { try ft.plain("last: ");  try ft.plain(n); try ft.plain("\n"); }
-    if (user.username.value)   |n| { try ft.plain("username: @"); try ft.plain(n); try ft.plain("\n"); }
+    if (user.first_name.value) |n| {
+        try ft.plain("first: ");
+        try ft.plain(n);
+        try ft.plain("\n");
+    }
+    if (user.last_name.value) |n| {
+        try ft.plain("last: ");
+        try ft.plain(n);
+        try ft.plain("\n");
+    }
+    if (user.username.value) |n| {
+        try ft.plain("username: @");
+        try ft.plain(n);
+        try ft.plain("\n");
+    }
     if (user.bot.value != null) try ft.italic("(bot account)");
     try msg.replyFmt(ft.text.items, ft.entities.items);
 }
@@ -165,16 +177,16 @@ fn onMessage(msg: tz.Msg) !void {
     if (!isAllowed(msg)) return;
 
     if (msg.is("/start") or msg.is("/help")) return onHelp(msg);
-    if (msg.prefix("/echo "))  return onEcho(msg);
-    if (msg.is("/fmt"))        return onFmt(msg);
-    if (msg.is("/keyboard"))   return onKeyboard(msg);
-    if (msg.is("/document"))   return onDocument(msg);
-    if (msg.is("/info"))       return onInfo(msg);
-    if (msg.is("/react"))      return onReact(msg);
-    if (msg.is("/unreact"))    return onUnreact(msg);
-    if (msg.is("/pin"))        return onPin(msg);
-    if (msg.is("/unpin"))      return onUnpin(msg);
-    if (msg.is("/forward"))    return onForward(msg);
+    if (msg.prefix("/echo ")) return onEcho(msg);
+    if (msg.is("/fmt")) return onFmt(msg);
+    if (msg.is("/keyboard")) return onKeyboard(msg);
+    if (msg.is("/document")) return onDocument(msg);
+    if (msg.is("/info")) return onInfo(msg);
+    if (msg.is("/react")) return onReact(msg);
+    if (msg.is("/unreact")) return onUnreact(msg);
+    if (msg.is("/pin")) return onPin(msg);
+    if (msg.is("/unpin")) return onUnpin(msg);
+    if (msg.is("/forward")) return onForward(msg);
 
     switch (msg.raw.media.value orelse return) {
         .MessageMediaPhoto => {

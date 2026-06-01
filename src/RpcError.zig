@@ -23,7 +23,7 @@ code: i32 = 0,
 /// Trailing integer parsed out of the message, if any: the wait seconds for
 /// `FLOOD_WAIT_N`, the DC id for `*_MIGRATE_N`. null when there is no numeric tail.
 value: ?i32 = null,
-name_buf: [64]u8 = undefined,
+name_buf: [64]u8,
 name_len: u8 = 0,
 
 /// The error type with any trailing `_<number>` stripped, e.g. "FLOOD_WAIT".
@@ -33,7 +33,8 @@ pub fn name(self: *const RpcError) []const u8 {
 
 /// Parse the wire bytes of an `rpc_error`, including the 4-byte constructor id.
 pub fn parse(raw: []const u8) RpcError {
-    var e: RpcError = .{};
+    // SAFETY: name_buf is always written via setName before being read; name_len guards access.
+    var e: RpcError = .{ .name_buf = undefined };
     if (raw.len < 8) return e;
     e.code = std.mem.readInt(i32, raw[4..8], .little);
     const msg = readTlString(raw[8..]);
