@@ -1,13 +1,14 @@
 const Msg = @This();
 const std = @import("std");
 const types = @import("types");
+const unions = @import("unions");
 const functions = @import("functions");
 const Context = @import("Context.zig");
 const File = @import("File.zig");
 const client = @import("client.zig");
 
-/// The concrete message struct (types.Message_ — not the Message union).
-pub const Raw = types.Message_;
+/// The concrete message struct (types.Message — not the Message union).
+pub const Raw = types.Message;
 
 ctx: Context,
 raw: Raw,
@@ -83,7 +84,7 @@ pub fn replyToId(self: Msg) ?i32 {
 }
 
 /// Download location for the attached photo or document. null if no media.
-pub fn mediaLocation(self: Msg) ?types.InputFileLocation {
+pub fn mediaLocation(self: Msg) ?unions.InputFileLocation {
     const med = self.raw.media.value orelse return null;
     return switch (med) {
         .MessageMediaPhoto => |mp| File.photoLocation(mp.photo.value orelse return null),
@@ -94,7 +95,7 @@ pub fn mediaLocation(self: Msg) ?types.InputFileLocation {
 
 /// Resolve the peer this message was sent to.
 /// Checks entities (current-update cache) first, falls back to session peer_cache.
-pub fn peer(self: Msg) ?types.InputPeer {
+pub fn peer(self: Msg) ?unions.InputPeer {
     return switch (self.raw.peer_id) {
         .PeerUser => |p| blk: {
             const ah = self.ctx.entities.accessHash(p.user_id) orelse break :blk self.ctx.resolvePeer(p.user_id);
@@ -125,7 +126,7 @@ pub fn reply(self: Msg, txt: []const u8) !void {
 }
 
 /// Reply with pre-built formatting entities (e.g. from FormattedText).
-pub fn replyFmt(self: Msg, txt: []const u8, entities: []types.MessageEntity) !void {
+pub fn replyFmt(self: Msg, txt: []const u8, entities: []unions.MessageEntity) !void {
     const p = self.peer() orelse return;
     try self.ctx.exec(functions.messages.SendMessage{
         .peer = p,

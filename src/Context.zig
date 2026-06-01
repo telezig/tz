@@ -4,6 +4,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const types = @import("types");
+const unions = @import("unions");
 const functions = @import("functions");
 const State = @import("State.zig");
 
@@ -72,20 +73,20 @@ pub fn execFile(self: Context, request: anytype) !void {
 }
 
 /// Look up a peer by user/channel id from the session cache. null if not seen yet.
-pub fn resolvePeer(self: Context, id: i64) ?types.InputPeer {
+pub fn resolvePeer(self: Context, id: i64) ?unions.InputPeer {
     self.mb_mutex.lockUncancelable(self.io);
     defer self.mb_mutex.unlock(self.io);
     return self.peer_cache.inputPeer(id);
 }
 
 /// Look up a channel by id from the session cache. null if not seen yet.
-pub fn resolveInputChannel(self: Context, id: i64) ?types.InputChannel {
+pub fn resolveInputChannel(self: Context, id: i64) ?unions.InputChannel {
     self.mb_mutex.lockUncancelable(self.io);
     defer self.mb_mutex.unlock(self.io);
     return self.peer_cache.inputChannel(id);
 }
 
-pub fn resolveUsername(self: Context, username: []const u8) !types.InputPeer {
+pub fn resolveUsername(self: Context, username: []const u8) !unions.InputPeer {
     const raw = std.mem.trimStart(u8, username, "@");
     if (raw.len == 0 or raw.len > 64) return error.InvalidUsername;
     var buf: [64]u8 = undefined;
@@ -138,12 +139,12 @@ pub const Entities = struct {
         return self.channels.get(channel_id);
     }
 
-    pub fn inputUser(self: *const Entities, user_id: i64) ?types.InputUser {
+    pub fn inputUser(self: *const Entities, user_id: i64) ?unions.InputUser {
         const ah = self.users.get(user_id) orelse return null;
         return .{ .InputUser = .{ .user_id = user_id, .access_hash = ah } };
     }
 
-    pub fn inputChannel(self: *const Entities, channel_id: i64) ?types.InputChannel {
+    pub fn inputChannel(self: *const Entities, channel_id: i64) ?unions.InputChannel {
         const ah = self.channels.get(channel_id) orelse return null;
         return .{ .InputChannel = .{ .channel_id = channel_id, .access_hash = ah } };
     }

@@ -218,9 +218,9 @@ pub fn MtProto(comptime Handler: type) type {
                     self.pong_event.set(io);
                     self.retryPending(io);
                 },
-                types.BadMsgNotification_.cid => {
+                types.BadMsgNotification.cid => {
                     var r: std.Io.Reader = .fixed(payload);
-                    const m = codec.decode(types.BadMsgNotification_, &r, self.allocator) catch {
+                    const m = codec.decode(types.BadMsgNotification, &r, self.allocator) catch {
                         std.log.warn("bad_msg_notification: decode failed, draining", .{});
                         return self.drainPending(io);
                     };

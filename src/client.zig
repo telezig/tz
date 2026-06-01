@@ -5,6 +5,7 @@ const Connector = @import("Connector.zig");
 const Storage = @import("Storage.zig");
 const codec = @import("codec");
 const types = @import("types");
+const unions = @import("unions");
 const functions = @import("functions");
 const RpcError = @import("RpcError.zig");
 const ulog = std.log.scoped(.updates);
@@ -16,7 +17,7 @@ const decodeOwned = Context.decodeOwned;
 
 pub const Handler = struct {
     cid: u32,
-    dispatch: *const fn (ctx: Context, update: types.Update) anyerror!void,
+    dispatch: *const fn (ctx: Context, update: unions.Update) anyerror!void,
 };
 
 pub fn handler(
@@ -26,7 +27,7 @@ pub fn handler(
     return .{
         .cid = UpdateType.cid,
         .dispatch = struct {
-            fn dispatch(ctx: Context, update: types.Update) anyerror!void {
+            fn dispatch(ctx: Context, update: unions.Update) anyerror!void {
                 switch (update) {
                     inline else => |inner| if (@TypeOf(inner) == UpdateType)
                         try cb(ctx, inner),
@@ -837,7 +838,7 @@ pub fn Client(comptime handlers: []const Handler) type {
             if (payload.len < 4) return;
             const cid = std.mem.readInt(u32, payload[0..4], .little);
             switch (cid) {
-                types.Updates_.cid, types.UpdatesCombined.cid => self.dispatchUpdates(io, payload) catch |err|
+                types.Updates.cid, types.UpdatesCombined.cid => self.dispatchUpdates(io, payload) catch |err|
                     std.log.warn("update dispatch error: {}", .{err}),
                 types.UpdateShort.cid => self.dispatchShort(io, payload) catch |err|
                     std.log.warn("update dispatch error: {}", .{err}),
@@ -859,9 +860,9 @@ pub fn Client(comptime handlers: []const Handler) type {
             self: *Self,
             io: Io,
             arena_alloc: Allocator,
-            updates: []const types.Update,
-            users: []const types.User,
-            chats: []const types.Chat,
+            updates: []const unions.Update,
+            users: []const unions.User,
+            chats: []const unions.Chat,
         ) !void {
             var entities: Entities = .{};
             for (users) |u| switch (u) {
@@ -911,10 +912,10 @@ pub fn Client(comptime handlers: []const Handler) type {
             io: Io,
             arena_alloc: Allocator,
             c: @import("State.zig").Container,
-            users: []const types.User,
-            chats: []const types.Chat,
+            users: []const unions.User,
+            chats: []const unions.Chat,
         ) !void {
-            var applied: []types.Update = &.{};
+            var applied: []unions.Update = &.{};
             var gap = false;
             {
                 self.mb_mutex.lockUncancelable(io);
@@ -937,7 +938,7 @@ pub fn Client(comptime handlers: []const Handler) type {
         }
 
         /// Caller must hold mb_mutex.
-        fn recordChannelHashesLocked(self: *Self, chats: []const types.Chat) void {
+        fn recordChannelHashesLocked(self: *Self, chats: []const unions.Chat) void {
             for (chats) |c| switch (c) {
                 .Channel => |ch| if (ch.access_hash.value) |ah| {
                     const gop = self.state.channels.getOrPut(self.allocator, ch.id) catch return;
@@ -966,7 +967,7 @@ pub fn Client(comptime handlers: []const Handler) type {
                     .updates = upd.updates,
                 }, upd.users, upd.chats);
             } else {
-                const upd = try codec.decodeStructBody(types.Updates_, &r, arena_alloc);
+                const upd = try codec.decodeStructBody(types.Updates, &r, arena_alloc);
                 // The bare `updates` container has no seq_start; its single group
                 // spans seq..seq, so seq_start == seq for the gap check.
                 try self.routeUpdates(io, arena_alloc, .{
@@ -984,7 +985,7 @@ pub fn Client(comptime handlers: []const Handler) type {
             const arena_alloc = arena.allocator();
             var r: std.Io.Reader = .fixed(payload[4..]);
             const upd = try codec.decodeStructBody(types.UpdateShort, &r, arena_alloc);
-            const updates = [_]types.Update{upd.update};
+            const updates = [_]unions.Update{upd.update};
             try self.routeUpdates(io, arena_alloc, .{ .date = upd.date, .updates = &updates }, &.{}, &.{});
         }
 
@@ -994,7 +995,7 @@ pub fn Client(comptime handlers: []const Handler) type {
             const arena_alloc = arena.allocator();
             var r: std.Io.Reader = .fixed(payload[4..]);
             const short = try codec.decodeStructBody(types.UpdateShortMessage, &r, arena_alloc);
-            const msg = types.Message_{
+            const msg = types.Message{
                 .id = short.id,
                 .out = short.out,
                 .mentioned = short.mentioned,
@@ -1010,7 +1011,7 @@ pub fn Client(comptime handlers: []const Handler) type {
                 .entities = short.entities,
                 .ttl_period = short.ttl_period,
             };
-            const updates = [_]types.Update{.{ .UpdateNewMessage = .{
+            const updates = [_]unions.Update{.{ .UpdateNewMessage = .{
                 .message = .{ .Message = msg },
                 .pts = short.pts,
                 .pts_count = short.pts_count,
@@ -1024,7 +1025,7 @@ pub fn Client(comptime handlers: []const Handler) type {
             const arena_alloc = arena.allocator();
             var r: std.Io.Reader = .fixed(payload[4..]);
             const short = try codec.decodeStructBody(types.UpdateShortChatMessage, &r, arena_alloc);
-            const msg = types.Message_{
+            const msg = types.Message{
                 .id = short.id,
                 .out = short.out,
                 .mentioned = short.mentioned,
@@ -1040,7 +1041,7 @@ pub fn Client(comptime handlers: []const Handler) type {
                 .entities = short.entities,
                 .ttl_period = short.ttl_period,
             };
-            const updates = [_]types.Update{.{ .UpdateNewMessage = .{
+            const updates = [_]unions.Update{.{ .UpdateNewMessage = .{
                 .message = .{ .Message = msg },
                 .pts = short.pts,
                 .pts_count = short.pts_count,

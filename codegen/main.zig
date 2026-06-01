@@ -58,5 +58,6 @@ pub fn main(init: std.process.Init) !void {
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, out_dir_path, .default_dir);
 
     try emit.emitTypes(&schema, &union_types, &single_types, &metadata, out_dir_path, io, allocator);
+    try emit.emitUnions(&schema, &union_types, &metadata, out_dir_path, io, allocator);
     try emit.emitFunctions(&schema, &union_types, &single_types, out_dir_path, io, allocator);
 }

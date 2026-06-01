@@ -3,6 +3,7 @@ const Connector = @import("Connector.zig");
 const client = @import("client.zig");
 
 pub const types = @import("types");
+pub const unions = @import("unions");
 pub const functions = @import("functions");
 
 pub const Client = client.Client;

@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const types = @import("types");
+const unions = @import("unions");
 const functions = @import("functions");
 const State = @This();
 const ulog = std.log.scoped(.updates);
@@ -45,10 +46,10 @@ pub const Container = struct {
     date: i32 = 0,
     seq: i32 = 0,
     seq_start: i32 = 0,
-    updates: []const types.Update,
+    updates: []const unions.Update,
 };
 
-fn messageChannelId(msg: types.Message) ?i64 {
+fn messageChannelId(msg: unions.Message) ?i64 {
     const peer = switch (msg) {
         .Message => |m| m.peer_id,
         .MessageService => |m| m.peer_id,
@@ -79,7 +80,7 @@ fn flagValue(comptime V: type, v: anytype) ?V {
 /// and the two sets are disjoint. `qts` is checked first because some qts
 /// updates (e.g. `UpdateChannelParticipant`) also carry a `channel_id` that is
 /// not a channel-pts target.
-pub fn ptsInfo(u: types.Update) ?PtsInfo {
+pub fn ptsInfo(u: unions.Update) ?PtsInfo {
     switch (u) {
         inline else => |body, tag| {
             const T = @TypeOf(body);
@@ -187,7 +188,7 @@ test "serialize/deserialize roundtrip" {
 }
 
 test "ptsInfo: common message update" {
-    const u = types.Update{ .UpdateNewMessage = .{
+    const u = unions.Update{ .UpdateNewMessage = .{
         .message = .{ .MessageEmpty = .{ .id = 1 } },
         .pts = 50,
         .pts_count = 1,
@@ -199,7 +200,7 @@ test "ptsInfo: common message update" {
 }
 
 test "ptsInfo: qts update routes to secondary" {
-    const u = types.Update{ .UpdateBotStopped = .{
+    const u = unions.Update{ .UpdateBotStopped = .{
         .user_id = 1,
         .date = 0,
         .stopped = true,
@@ -214,7 +215,7 @@ test "ptsInfo: qts update routes to secondary" {
 test "ptsInfo: qts wins over channel_id" {
     // UpdateChannelParticipant carries both channel_id and qts; it belongs to
     // the secondary (qts) sequence, NOT the channel pts sequence.
-    const u = types.Update{ .UpdateChannelParticipant = .{
+    const u = unions.Update{ .UpdateChannelParticipant = .{
         .channel_id = 999,
         .date = 0,
         .actor_id = 1,
@@ -227,7 +228,7 @@ test "ptsInfo: qts wins over channel_id" {
 }
 
 test "ptsInfo: channel update via explicit channel_id" {
-    const u = types.Update{ .UpdateDeleteChannelMessages = .{
+    const u = unions.Update{ .UpdateDeleteChannelMessages = .{
         .channel_id = 999,
         .messages = &.{},
         .pts = 12,
@@ -239,7 +240,7 @@ test "ptsInfo: channel update via explicit channel_id" {
 }
 
 test "ptsInfo: channel message via message.peer_id" {
-    const u = types.Update{ .UpdateNewChannelMessage = .{
+    const u = unions.Update{ .UpdateNewChannelMessage = .{
         .message = .{ .Message = .{
             .id = 1,
             .peer_id = .{ .PeerChannel = .{ .channel_id = 321 } },
@@ -254,7 +255,7 @@ test "ptsInfo: channel message via message.peer_id" {
 }
 
 test "ptsInfo: no pts returns null" {
-    const u = types.Update{ .UpdateChannelUserTyping = .{
+    const u = unions.Update{ .UpdateChannelUserTyping = .{
         .channel_id = 1,
         .from_id = .{ .PeerUser = .{ .user_id = 2 } },
         .action = .{ .SendMessageTypingAction = .{} },
@@ -264,7 +265,7 @@ test "ptsInfo: no pts returns null" {
 
 pub const ProcessResult = struct {
     /// updates ready to apply, in confirmed order (arena-owned).
-    applied: []types.Update,
+    applied: []unions.Update,
 };
 
 fn localPts(self: *State, entry: Entry) ?i32 {
@@ -302,7 +303,7 @@ fn markGap(self: *State, gpa: std.mem.Allocator, entry: Entry) !void {
     }
 }
 
-fn lessByPts(_: void, a: types.Update, b: types.Update) bool {
+fn lessByPts(_: void, a: unions.Update, b: unions.Update) bool {
     const pa = if (ptsInfo(a)) |i| i.pts - i.count else std.math.minInt(i32);
     const pb = if (ptsInfo(b)) |i| i.pts - i.count else std.math.minInt(i32);
     return pa < pb;
@@ -335,10 +336,10 @@ pub fn process(
         }
     }
 
-    const sorted = try arena.dupe(types.Update, c.updates);
-    std.sort.pdq(types.Update, sorted, {}, lessByPts);
+    const sorted = try arena.dupe(unions.Update, c.updates);
+    std.sort.pdq(unions.Update, sorted, {}, lessByPts);
 
-    var applied: std.ArrayListUnmanaged(types.Update) = .empty;
+    var applied: std.ArrayListUnmanaged(unions.Update) = .empty;
     var gapped = false;
     for (sorted) |u| {
         const tag = @tagName(u);
@@ -410,7 +411,7 @@ test "process: in-order applies, advances pts and seq" {
     defer st.deinit(gpa);
     st.pts = 10;
     st.seq = 3;
-    const ups = [_]types.Update{.{ .UpdateNewMessage = .{
+    const ups = [_]unions.Update{.{ .UpdateNewMessage = .{
         .message = .{ .MessageEmpty = .{ .id = 1 } },
         .pts = 11,
         .pts_count = 1,
@@ -430,7 +431,7 @@ test "process: gap marks getting_diff, does not apply" {
     var st = State{};
     defer st.deinit(gpa);
     st.pts = 10;
-    const ups = [_]types.Update{.{ .UpdateNewMessage = .{
+    const ups = [_]unions.Update{.{ .UpdateNewMessage = .{
         .message = .{ .MessageEmpty = .{ .id = 1 } },
         .pts = 15,
         .pts_count = 1,
@@ -449,7 +450,7 @@ test "process: qts update advances qts, not pts" {
     defer st.deinit(gpa);
     st.pts = 50;
     st.qts = 10;
-    const ups = [_]types.Update{.{ .UpdateBotStopped = .{
+    const ups = [_]unions.Update{.{ .UpdateBotStopped = .{
         .user_id = 1,
         .date = 0,
         .stopped = true,
@@ -470,7 +471,7 @@ test "process: qts gap marks getting_diff, leaves pts" {
     defer st.deinit(gpa);
     st.pts = 50;
     st.qts = 10;
-    const ups = [_]types.Update{.{ .UpdateBotStopped = .{
+    const ups = [_]unions.Update{.{ .UpdateBotStopped = .{
         .user_id = 1,
         .date = 0,
         .stopped = true,
@@ -490,7 +491,7 @@ test "process: seq gap skips batch and marks getting_diff" {
     defer st.deinit(gpa);
     st.pts = 10;
     st.seq = 5;
-    const ups = [_]types.Update{.{ .UpdateNewMessage = .{
+    const ups = [_]unions.Update{.{ .UpdateNewMessage = .{
         .message = .{ .MessageEmpty = .{ .id = 1 } },
         .pts = 11,
         .pts_count = 1,
@@ -511,7 +512,7 @@ test "process: stale seq batch ignored" {
     defer st.deinit(gpa);
     st.pts = 10;
     st.seq = 5;
-    const ups = [_]types.Update{.{ .UpdateNewMessage = .{
+    const ups = [_]unions.Update{.{ .UpdateNewMessage = .{
         .message = .{ .MessageEmpty = .{ .id = 1 } },
         .pts = 11,
         .pts_count = 1,
@@ -530,7 +531,7 @@ test "process: duplicate (pts <= local) skipped" {
     var st = State{};
     defer st.deinit(gpa);
     st.pts = 20;
-    const ups = [_]types.Update{.{ .UpdateNewMessage = .{
+    const ups = [_]unions.Update{.{ .UpdateNewMessage = .{
         .message = .{ .MessageEmpty = .{ .id = 1 } },
         .pts = 18,
         .pts_count = 1,
@@ -548,7 +549,7 @@ test "process: UpdateChannelTooLong forces channel difference (with pts)" {
     defer st.deinit(gpa);
     var too_long = types.UpdateChannelTooLong{ .channel_id = 444 };
     too_long.pts = .some(30);
-    const ups = [_]types.Update{.{ .UpdateChannelTooLong = too_long }};
+    const ups = [_]unions.Update{.{ .UpdateChannelTooLong = too_long }};
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const res = try st.process(gpa, arena.allocator(), .{ .updates = &ups });
@@ -561,7 +562,7 @@ test "process: UpdateChannelTooLong forces channel difference (no pts)" {
     const gpa = std.testing.allocator;
     var st = State{};
     defer st.deinit(gpa);
-    const ups = [_]types.Update{.{ .UpdateChannelTooLong = .{ .channel_id = 444 } }};
+    const ups = [_]unions.Update{.{ .UpdateChannelTooLong = .{ .channel_id = 444 } }};
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const res = try st.process(gpa, arena.allocator(), .{ .updates = &ups });
@@ -573,7 +574,7 @@ test "process: first sighting of a channel seeds pts and applies (no diff)" {
     const gpa = std.testing.allocator;
     var st = State{};
     defer st.deinit(gpa);
-    const ups = [_]types.Update{.{ .UpdateDeleteChannelMessages = .{
+    const ups = [_]unions.Update{.{ .UpdateDeleteChannelMessages = .{
         .channel_id = 777,
         .messages = &.{},
         .pts = 5,
@@ -592,7 +593,7 @@ test "process: channel with recorded access_hash but pts=0 seeds, not gaps" {
     var st = State{};
     defer st.deinit(gpa);
     try st.channels.put(gpa, 888, .{ .pts = 0, .access_hash = 42 });
-    const ups = [_]types.Update{.{ .UpdateDeleteChannelMessages = .{
+    const ups = [_]unions.Update{.{ .UpdateDeleteChannelMessages = .{
         .channel_id = 888,
         .messages = &.{},
         .pts = 5,
@@ -611,7 +612,7 @@ test "process: no-pts update always applied" {
     const gpa = std.testing.allocator;
     var st = State{};
     defer st.deinit(gpa);
-    const ups = [_]types.Update{.{ .UpdateChannelUserTyping = .{
+    const ups = [_]unions.Update{.{ .UpdateChannelUserTyping = .{
         .channel_id = 1,
         .from_id = .{ .PeerUser = .{ .user_id = 2 } },
         .action = .{ .SendMessageTypingAction = .{} },
@@ -663,9 +664,9 @@ pub fn takeDifferenceRequest(self: *State) ?Request {
 }
 
 pub const DiffApplied = struct {
-    updates: []types.Update,
-    users: []const types.User,
-    chats: []const types.Chat,
+    updates: []unions.Update,
+    users: []const unions.User,
+    chats: []const unions.Chat,
     /// true if this was a partial slice and the difference loop must continue.
     has_more: bool,
 };
@@ -674,10 +675,10 @@ pub const DiffApplied = struct {
 /// and concatenates other_updates. These are dispatched directly (not re-run through process).
 fn diffToUpdates(
     arena: std.mem.Allocator,
-    new_messages: []const types.Message,
-    other: []const types.Update,
-) ![]types.Update {
-    var list: std.ArrayListUnmanaged(types.Update) = .empty;
+    new_messages: []const unions.Message,
+    other: []const unions.Update,
+) ![]unions.Update {
+    var list: std.ArrayListUnmanaged(unions.Update) = .empty;
     for (new_messages) |m| {
         try list.append(arena, .{ .UpdateNewMessage = .{ .message = m, .pts = 0, .pts_count = 0 } });
     }
@@ -688,7 +689,7 @@ fn diffToUpdates(
 pub fn applyDifference(
     self: *State,
     arena: std.mem.Allocator,
-    diff: types.UpdatesDifference,
+    diff: unions.UpdatesDifference,
 ) !DiffApplied {
     switch (diff) {
         .UpdatesDifferenceEmpty => |e| {
@@ -742,7 +743,7 @@ test "applyDifference advances state and clears gap" {
     st.getting_diff = true;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    const diff = types.UpdatesDifference{ .UpdatesDifference = .{
+    const diff = unions.UpdatesDifference{ .UpdatesDifference = .{
         .new_messages = &.{},
         .new_encrypted_messages = &.{},
         .other_updates = &.{},
@@ -770,7 +771,7 @@ pub fn applyChannelDifference(
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
     channel_id: i64,
-    diff: types.UpdatesChannelDifference,
+    diff: unions.UpdatesChannelDifference,
 ) !DiffApplied {
     switch (diff) {
         .UpdatesChannelDifferenceEmpty => |d| {
@@ -810,7 +811,7 @@ test "applyChannelDifference advances channel pts and clears gap" {
     try st.getting_channel_diff.put(gpa, 77, {});
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    const diff = types.UpdatesChannelDifference{ .UpdatesChannelDifference = .{
+    const diff = unions.UpdatesChannelDifference{ .UpdatesChannelDifference = .{
         .final = .some({}),
         .pts = 8,
         .new_messages = &.{},
@@ -832,7 +833,7 @@ test "non-final channel difference keeps gap for more" {
     try st.getting_channel_diff.put(gpa, 77, {});
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    const diff = types.UpdatesChannelDifference{ .UpdatesChannelDifference = .{
+    const diff = unions.UpdatesChannelDifference{ .UpdatesChannelDifference = .{
         .pts = 8,
         .new_messages = &.{},
         .other_updates = &.{},
@@ -852,7 +853,7 @@ test "channelDifferenceTooLong adopts dialog pts and ends when final" {
     try st.getting_channel_diff.put(gpa, 77, {});
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    var dlg = types.Dialog_{
+    var dlg = types.Dialog{
         .peer = .{ .PeerChannel = .{ .channel_id = 77 } },
         .top_message = 0,
         .read_inbox_max_id = 0,
@@ -871,7 +872,7 @@ test "channelDifferenceTooLong adopts dialog pts and ends when final" {
         .users = &.{},
     };
     too_long.final = .some({});
-    const diff = types.UpdatesChannelDifference{ .UpdatesChannelDifferenceTooLong = too_long };
+    const diff = unions.UpdatesChannelDifference{ .UpdatesChannelDifferenceTooLong = too_long };
     const res = try st.applyChannelDifference(gpa, arena.allocator(), 77, diff);
     try std.testing.expectEqual(@as(i32, 50), st.channels.get(77).?.pts);
     try std.testing.expect(!st.getting_channel_diff.contains(77));
@@ -932,8 +933,8 @@ pub const PeerCache = struct {
     pub fn update(
         self: *PeerCache,
         gpa: std.mem.Allocator,
-        users: []const types.User,
-        chats: []const types.Chat,
+        users: []const unions.User,
+        chats: []const unions.Chat,
     ) !void {
         for (users) |u| switch (u) {
             .User => |user| {
@@ -962,7 +963,7 @@ pub const PeerCache = struct {
         };
     }
 
-    pub fn inputPeer(self: *const PeerCache, id: i64) ?types.InputPeer {
+    pub fn inputPeer(self: *const PeerCache, id: i64) ?unions.InputPeer {
         const e = self.map.get(id) orelse return null;
         return switch (e.kind) {
             .user => .{ .InputPeerUser = .{ .user_id = id, .access_hash = e.access_hash } },
@@ -971,13 +972,13 @@ pub const PeerCache = struct {
         };
     }
 
-    pub fn inputUser(self: *const PeerCache, id: i64) ?types.InputUser {
+    pub fn inputUser(self: *const PeerCache, id: i64) ?unions.InputUser {
         const e = self.map.get(id) orelse return null;
         if (e.kind != .user) return null;
         return .{ .InputUser = .{ .user_id = id, .access_hash = e.access_hash } };
     }
 
-    pub fn inputChannel(self: *const PeerCache, id: i64) ?types.InputChannel {
+    pub fn inputChannel(self: *const PeerCache, id: i64) ?unions.InputChannel {
         const e = self.map.get(id) orelse return null;
         if (e.kind != .channel) return null;
         return .{ .InputChannel = .{ .channel_id = id, .access_hash = e.access_hash } };
@@ -989,11 +990,11 @@ test "PeerCache: min peer does not overwrite non-min" {
     var pc = PeerCache{};
     defer pc.deinit(gpa);
 
-    const full = [_]types.User{.{ .User = .{ .id = 10, .access_hash = .{ .value = 1234 } } }};
+    const full = [_]unions.User{.{ .User = .{ .id = 10, .access_hash = .{ .value = 1234 } } }};
     try pc.update(gpa, &full, &.{});
-    var min_user = types.User_{ .id = 10, .access_hash = .{ .value = 9999 } };
+    var min_user = types.User{ .id = 10, .access_hash = .{ .value = 9999 } };
     min_user.min = .some({});
-    const min = [_]types.User{.{ .User = min_user }};
+    const min = [_]unions.User{.{ .User = min_user }};
     try pc.update(gpa, &min, &.{});
 
     const ip = pc.inputPeer(10).?;
@@ -1004,7 +1005,7 @@ test "PeerCache: inputChannel resolves from chats" {
     const gpa = std.testing.allocator;
     var pc = PeerCache{};
     defer pc.deinit(gpa);
-    const chats = [_]types.Chat{.{ .Channel = .{ .id = 77, .access_hash = .{ .value = 555 }, .title = "c", .photo = undefined, .date = 0 } }};
+    const chats = [_]unions.Chat{.{ .Channel = .{ .id = 77, .access_hash = .{ .value = 555 }, .title = "c", .photo = undefined, .date = 0 } }};
     try pc.update(gpa, &.{}, &chats);
     const ic = pc.inputChannel(77).?;
     try std.testing.expectEqual(@as(i64, 77), ic.InputChannel.channel_id);

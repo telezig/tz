@@ -29,6 +29,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "codec", .module = codec_module }},
     });
+    const unions_module = b.createModule(.{
+        .root_source_file = gen_dir.path(b, "unions.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "types", .module = types_module }},
+    });
+    // types' struct fields reference boxed unions, and unions' variants reference
+    // constructor structs — the two generated modules import each other.
+    types_module.addImport("unions", unions_module);
+
     const functions_module = b.createModule(.{
         .root_source_file = gen_dir.path(b, "functions.zig"),
         .target = target,
@@ -36,6 +46,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "codec", .module = codec_module },
             .{ .name = "types", .module = types_module },
+            .{ .name = "unions", .module = unions_module },
         },
     });
 
@@ -46,6 +57,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "codec", .module = codec_module },
             .{ .name = "types", .module = types_module },
+            .{ .name = "unions", .module = unions_module },
             .{ .name = "functions", .module = functions_module },
         },
     });

@@ -15,7 +15,7 @@ fn onCommand(msg: tz.Msg) !void {
     if (msg.text().len == 0 or msg.text()[0] != '/') return;
     const peer = msg.peer() orelse return;
     if (msg.is("/whoami")) {
-        var id_input = [_]tg.InputUser{.{ .InputUserSelf = .{} }};
+        var id_input = [_]tz.unions.InputUser{.{ .InputUserSelf = .{} }};
         const users_resp = try msg.ctx.call(f.users.GetUsers{ .id = &id_input });
         defer users_resp.deinit();
         const user = switch (users_resp.value[0]) {

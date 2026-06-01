@@ -2,6 +2,7 @@ const File = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("types");
+const unions = @import("unions");
 const functions = @import("functions");
 const Context = @import("Context.zig");
 const codec = @import("codec");
@@ -19,13 +20,13 @@ const CdnState = struct {
 };
 
 ctx: Context,
-location: types.InputFileLocation,
+location: unions.InputFileLocation,
 offset: i64 = 0,
 done: bool = false,
 cdn: ?CdnState = null,
 chunk: []u8 = &.{}, // current chunk; owned via ctx.allocator; valid until next next()/deinit()
 
-pub fn init(ctx: Context, location: types.InputFileLocation) File {
+pub fn init(ctx: Context, location: unions.InputFileLocation) File {
     return .{ .ctx = ctx, .location = location };
 }
 
@@ -158,7 +159,7 @@ pub fn readAll(self: *File, allocator: Allocator) ![]u8 {
 // --- Static helpers ---
 
 /// Extract InputFileLocation from a Document.
-pub fn documentLocation(doc: types.Document) ?types.InputFileLocation {
+pub fn documentLocation(doc: unions.Document) ?unions.InputFileLocation {
     const d = switch (doc) {
         .Document => |d| d,
         else => return null,
@@ -172,7 +173,7 @@ pub fn documentLocation(doc: types.Document) ?types.InputFileLocation {
 }
 
 /// Extract InputFileLocation from a Photo, selecting the largest available size.
-pub fn photoLocation(photo: types.Photo) ?types.InputFileLocation {
+pub fn photoLocation(photo: unions.Photo) ?unions.InputFileLocation {
     const p = switch (photo) {
         .Photo => |p| p,
         else => return null,
@@ -212,7 +213,7 @@ const upload_part = 128 * 1024;
 /// Upload bytes to Telegram. Returns an InputFile ready for use in SendMedia.
 /// For small files (≤10 MB) the InputFile.md5_checksum is heap-allocated via
 /// ctx.allocator; the caller must free it.
-pub fn upload(ctx: Context, data: []const u8, name: []const u8) !types.InputFile {
+pub fn upload(ctx: Context, data: []const u8, name: []const u8) !unions.InputFile {
     const file_id = codec.nextRandomId();
     const n_parts: i32 = @intCast((data.len + upload_part - 1) / upload_part);
     const is_big = data.len > big_threshold;

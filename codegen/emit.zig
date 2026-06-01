@@ -49,9 +49,8 @@ fn tlTypeToZig(
         var nb: [256]u8 = undefined;
         const zname = names.typeName(tl_type, &nb);
         const ptr = if (box) "*" else "";
-        if (qualify_unions)
-            return std.fmt.allocPrint(arena, "{s}@import(\"types\").{s}", .{ ptr, zname });
-        return std.fmt.allocPrint(arena, "{s}{s}", .{ ptr, zname });
+        // Boxed tagged unions live in unions.zig — always qualified, even from types.zig.
+        return std.fmt.allocPrint(arena, "{s}@import(\"unions\").{s}", .{ ptr, zname });
     }
 
     if (single_types.get(tl_type)) |ctor_name| {
@@ -113,21 +112,6 @@ pub fn emitTypes(
     var name_buf: [256]u8 = undefined;
     var field_buf: [256]u8 = undefined;
 
-    // Constructors that share their Zig name with their union type get a trailing '_'
-    var name_suffix = std.StringHashMap(bool).init(allocator);
-    defer name_suffix.deinit();
-    {
-        var nb1: [256]u8 = undefined;
-        var nb2: [256]u8 = undefined;
-        for (schema.constructors.items) |ctor| {
-            if (ctor.is_function) continue;
-            if (!union_types.contains(ctor.result_type)) continue;
-            const cn = names.typeName(ctor.name, &nb1);
-            const rn = names.typeName(ctor.result_type, &nb2);
-            if (std.mem.eql(u8, cn, rn)) try name_suffix.put(ctor.name, true);
-        }
-    }
-
     // Emit constructor structs
     for (schema.constructors.items) |ctor| {
         if (ctor.is_function) continue;
@@ -138,12 +122,7 @@ pub fn emitTypes(
             continue;
         }
 
-        const base = names.typeName(ctor.name, &name_buf);
-        const ctor_name = if (name_suffix.contains(ctor.name))
-            try std.fmt.allocPrint(allocator, "{s}_", .{base})
-        else
-            try std.fmt.allocPrint(allocator, "{s}", .{base});
-        defer allocator.free(ctor_name);
+        const ctor_name = names.typeName(ctor.name, &name_buf);
 
         try buf.print(allocator, "pub const {s} = struct {{\n", .{ctor_name});
         try buf.print(allocator, "    pub const cid: u32 = 0x{x:0>8};\n", .{ctor.id});
@@ -175,7 +154,24 @@ pub fn emitTypes(
         try buf.appendSlice(allocator, "};\n\n");
     }
 
-    // Emit union types
+    var path_buf: [512]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/types.zig", .{out_dir});
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf.items });
+}
+
+// Emit unions.zig: one tagged union per multi-constructor TL type. Variant tags keep
+// the constructor's PascalCase name (faithful to TL); payloads point into types.zig.
+pub fn emitUnions(
+    schema: *const parse.Schema,
+    union_types: *const std.StringHashMap(void),
+    metadata: *const Metadata,
+    out_dir: []const u8,
+    io: Io,
+    allocator: Allocator,
+) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
     var groups = std.StringHashMap(std.ArrayList(Constructor)).init(allocator);
     defer {
         var vit = groups.valueIterator();
@@ -196,29 +192,23 @@ pub fn emitTypes(
         try res.value_ptr.append(allocator, ctor);
     }
 
+    var name_buf: [256]u8 = undefined;
+    var tag_buf: [256]u8 = undefined;
     for (order.items) |result_type| {
         const ctors = (groups.get(result_type) orelse continue).items;
         const union_name = names.typeName(result_type, &name_buf);
         try buf.print(allocator, "pub const {s} = union(enum) {{\n", .{union_name});
         for (ctors) |ctor| {
-            const tag_name = names.typeName(ctor.name, &name_buf);
-            const type_name = if (name_suffix.contains(ctor.name))
-                try std.fmt.allocPrint(allocator, "{s}_", .{tag_name})
-            else
-                try std.fmt.allocPrint(allocator, "{s}", .{tag_name});
-            defer allocator.free(type_name);
-            // Recursive constructors are boxed in the union variant too
-            if (metadata.isRecursive(ctor)) {
-                try buf.print(allocator, "    {s}: *{s},\n", .{ tag_name, type_name });
-            } else {
-                try buf.print(allocator, "    {s}: {s},\n", .{ tag_name, type_name });
-            }
+            const tag = names.typeName(ctor.name, &tag_buf);
+            // Recursive constructors are boxed in the union variant too.
+            const star: []const u8 = if (metadata.isRecursive(ctor)) "*" else "";
+            try buf.print(allocator, "    {s}: {s}@import(\"types\").{s},\n", .{ tag, star, tag });
         }
         try buf.appendSlice(allocator, "};\n\n");
     }
 
     var path_buf: [512]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/types.zig", .{out_dir});
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/unions.zig", .{out_dir});
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf.items });
 }
 
@@ -303,7 +293,8 @@ pub fn emitFunctions(
                 try buf.print(allocator, "{s}    pub const Response = {s};\n", .{ indent, resp_type });
             } else {
                 const resp = names.typeName(ctor.result_type, &resp_buf);
-                try buf.print(allocator, "{s}    pub const Response = @import(\"types\").{s};\n", .{ indent, resp });
+                const mod: []const u8 = if (union_types.contains(ctor.result_type)) "unions" else "types";
+                try buf.print(allocator, "{s}    pub const Response = @import(\"{s}\").{s};\n", .{ indent, mod, resp });
             }
             try buf.print(allocator, "{s}}};\n\n", .{indent});
         }

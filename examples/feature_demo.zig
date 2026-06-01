@@ -19,7 +19,7 @@ fn isAllowed(msg: tz.Msg) bool {
     };
 }
 
-fn stickerFilename(doc: tg.Document_) []const u8 {
+fn stickerFilename(doc: tg.Document) []const u8 {
     for (doc.attributes) |attr| {
         switch (attr) {
             .DocumentAttributeFilename => |a| return a.file_name,
@@ -90,11 +90,11 @@ fn onFmt(msg: tz.Msg) !void {
 
 fn onKeyboard(msg: tz.Msg) !void {
     const peer = msg.peer() orelse return;
-    var row1 = [_]tg.KeyboardButton{
+    var row1 = [_]tz.unions.KeyboardButton{
         h.keyboard.callbackButton("Button A", "cb:a"),
         h.keyboard.callbackButton("Button B", "cb:b"),
     };
-    var row2 = [_]tg.KeyboardButton{
+    var row2 = [_]tz.unions.KeyboardButton{
         h.keyboard.urlButton("ziglang.org", "https://ziglang.org"),
     };
     var rows = [_]tg.KeyboardButtonRow{
@@ -115,7 +115,7 @@ fn onDocument(msg: tz.Msg) !void {
 
 fn onInfo(msg: tz.Msg) !void {
     const sender_id = msg.senderId() orelse return;
-    var id_input = [_]tg.InputUser{msg.ctx.entities.inputUser(sender_id) orelse return};
+    var id_input = [_]tz.unions.InputUser{msg.ctx.entities.inputUser(sender_id) orelse return};
     const users_resp = try msg.ctx.call(f.users.GetUsers{ .id = &id_input });
     defer users_resp.deinit();
     if (users_resp.value.len == 0) return msg.reply("no result");

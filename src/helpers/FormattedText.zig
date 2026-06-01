@@ -1,6 +1,7 @@
 const FormattedText = @This();
 const std = @import("std");
 const types = @import("types");
+const unions = @import("unions");
 
 pub fn utf16Len(s: []const u8) i32 {
     var len: i32 = 0;
@@ -14,7 +15,7 @@ pub fn utf16Len(s: []const u8) i32 {
 
 allocator: std.mem.Allocator,
 text: std.ArrayList(u8),
-entities: std.ArrayList(types.MessageEntity),
+entities: std.ArrayList(unions.MessageEntity),
 
 pub fn init(allocator: std.mem.Allocator) FormattedText {
     return .{

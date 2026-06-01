@@ -14,6 +14,8 @@ echo bot: ~700kb statically linked (`ReleaseSmall`).
 
 ## usage
 
+generated tl mirrors the schema's type/constructor split across two namespaces: `tz.types` holds the constructor structs (`UpdateNewMessage`, `Message`), `tz.unions` holds the boxed tagged unions you `switch` on (`Update`, `Message`). variant tags keep the TL constructor name (`.UpdateNewMessage`). `tz.functions` holds the tl methods. examples alias `const tg = tz.types; const f = tz.functions;`.
+
 message handlers are `fn(msg: Msg) !void`, registered with `tz.Msg.handler`. other update types use `tz.handler` with `fn(ctx, update) !void`:
 
 ```zig
@@ -43,7 +45,7 @@ defer client.deinit();
 try client.run(io);
 ```
 
-`tz.Msg` wraps `ctx` + the concrete `Message_` struct. accessors: `text()`, `id()`, `date()`, `peer()`, `senderId()`, `replyToId()`, `mediaLocation()`, `is(s)`, `prefix(s)`, `contains(s)`. active operations: `reply(text)`, `respond(text)`, `replyFmt(text, entities)`. raw access via `msg.raw` and `msg.ctx`.
+`tz.Msg` wraps `ctx` + the concrete `Message` struct. accessors: `text()`, `id()`, `date()`, `peer()`, `senderId()`, `replyToId()`, `mediaLocation()`, `is(s)`, `prefix(s)`, `contains(s)`. active operations: `reply(text)`, `respond(text)`, `replyFmt(text, entities)`. raw access via `msg.raw` and `msg.ctx`.
 
 `respond` sends to the same peer without a reply thread. `reply` sets `reply_to` so clients show the quote.
 

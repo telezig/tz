@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("types");
+const unions = @import("unions");
 const functions = @import("functions");
 
 pub const Context = @import("Context.zig");
@@ -15,7 +16,7 @@ pub const documentLocation = File.documentLocation;
 pub const photoLocation = File.photoLocation;
 
 /// Download an entire file into a heap-allocated buffer. caller frees with ctx.allocator.
-pub fn download(ctx: Context, location: types.InputFileLocation) ![]u8 {
+pub fn download(ctx: Context, location: unions.InputFileLocation) ![]u8 {
     var f = File.init(ctx, location);
     defer f.deinit();
     return f.readAll(ctx.allocator);
@@ -29,7 +30,7 @@ pub const PinOptions = struct {
 
 pub const EditOptions = struct {
     text: ?[]const u8 = null,
-    reply_markup: ?types.ReplyMarkup = null,
+    reply_markup: ?unions.ReplyMarkup = null,
 };
 
 pub const CallbackAnswerOptions = struct {
@@ -47,7 +48,7 @@ pub const InlineQueryOptions = struct {
 };
 
 /// Forward messages by id from one peer to another.
-pub fn forwardMessages(ctx: Context, from_peer: types.InputPeer, to_peer: types.InputPeer, ids: []i32) !void {
+pub fn forwardMessages(ctx: Context, from_peer: unions.InputPeer, to_peer: unions.InputPeer, ids: []i32) !void {
     const random_ids = try ctx.allocator.alloc(i64, ids.len);
     defer ctx.allocator.free(random_ids);
     for (random_ids) |*r| ctx.io.random(std.mem.asBytes(r));
@@ -60,7 +61,7 @@ pub fn forwardMessages(ctx: Context, from_peer: types.InputPeer, to_peer: types.
 }
 
 /// Pin or unpin a message. set opts.unpin to unpin.
-pub fn pinMessage(ctx: Context, peer: types.InputPeer, msg_id: i32, opts: PinOptions) !void {
+pub fn pinMessage(ctx: Context, peer: unions.InputPeer, msg_id: i32, opts: PinOptions) !void {
     try ctx.exec(functions.messages.UpdatePinnedMessage{
         .peer = peer,
         .id = msg_id,
@@ -71,7 +72,7 @@ pub fn pinMessage(ctx: Context, peer: types.InputPeer, msg_id: i32, opts: PinOpt
 }
 
 /// Edit text and/or reply markup of a message.
-pub fn editMessage(ctx: Context, peer: types.InputPeer, msg_id: i32, opts: EditOptions) !void {
+pub fn editMessage(ctx: Context, peer: unions.InputPeer, msg_id: i32, opts: EditOptions) !void {
     try ctx.exec(functions.messages.EditMessage{
         .peer = peer,
         .id = msg_id,
@@ -81,11 +82,11 @@ pub fn editMessage(ctx: Context, peer: types.InputPeer, msg_id: i32, opts: EditO
 }
 
 /// Delete a message. revokes for all participants where possible.
-pub fn deleteMessage(ctx: Context, peer: types.InputPeer, msg_id: i32) !void {
+pub fn deleteMessage(ctx: Context, peer: unions.InputPeer, msg_id: i32) !void {
     var ids = [_]i32{msg_id};
     switch (peer) {
         .InputPeerChannel => |p| {
-            const chan = types.InputChannel{ .InputChannel = .{
+            const chan = unions.InputChannel{ .InputChannel = .{
                 .channel_id = p.channel_id,
                 .access_hash = p.access_hash,
             } };
@@ -99,13 +100,13 @@ pub fn deleteMessage(ctx: Context, peer: types.InputPeer, msg_id: i32) !void {
 }
 
 /// Show a typing indicator or other chat action.
-pub fn sendChatAction(ctx: Context, peer: types.InputPeer, action: types.SendMessageAction) !void {
+pub fn sendChatAction(ctx: Context, peer: unions.InputPeer, action: unions.SendMessageAction) !void {
     try ctx.exec(functions.messages.SetTyping{ .peer = peer, .action = action });
 }
 
 /// Fetch the bot/user's own account info.
-pub fn getMe(ctx: Context) !Context.Response([]const types.User) {
-    var id = [_]types.InputUser{.{ .InputUserSelf = .{} }};
+pub fn getMe(ctx: Context) !Context.Response([]const unions.User) {
+    var id = [_]unions.InputUser{.{ .InputUserSelf = .{} }};
     const resp = try ctx.call(functions.users.GetUsers{ .id = &id });
     return .{ .arena = resp.arena, .value = resp.value };
 }
@@ -133,7 +134,7 @@ pub fn answerInlineCallbackQuery(ctx: Context, update: types.UpdateInlineBotCall
 }
 
 /// Answer an inline query with a list of results.
-pub fn answerInlineQuery(ctx: Context, update: types.UpdateBotInlineQuery, results: []const types.InputBotInlineResult, opts: InlineQueryOptions) !void {
+pub fn answerInlineQuery(ctx: Context, update: types.UpdateBotInlineQuery, results: []const unions.InputBotInlineResult, opts: InlineQueryOptions) !void {
     try ctx.exec(functions.messages.SetInlineBotResults{
         .gallery = if (opts.is_gallery) .some({}) else .none,
         .private = if (opts.is_private) .some({}) else .none,
@@ -145,8 +146,8 @@ pub fn answerInlineQuery(ctx: Context, update: types.UpdateBotInlineQuery, resul
 }
 
 /// Add an emoji reaction to a message.
-pub fn addReaction(ctx: Context, peer: types.InputPeer, msg_id: i32, emoticon: []const u8) !void {
-    var reactions = [_]types.Reaction{.{ .ReactionEmoji = .{ .emoticon = emoticon } }};
+pub fn addReaction(ctx: Context, peer: unions.InputPeer, msg_id: i32, emoticon: []const u8) !void {
+    var reactions = [_]unions.Reaction{.{ .ReactionEmoji = .{ .emoticon = emoticon } }};
     try ctx.exec(functions.messages.SendReaction{
         .peer = peer,
         .msg_id = msg_id,
@@ -155,8 +156,8 @@ pub fn addReaction(ctx: Context, peer: types.InputPeer, msg_id: i32, emoticon: [
 }
 
 /// Remove all reactions from a message.
-pub fn removeReaction(ctx: Context, peer: types.InputPeer, msg_id: i32) !void {
-    var reactions = [_]types.Reaction{};
+pub fn removeReaction(ctx: Context, peer: unions.InputPeer, msg_id: i32) !void {
+    var reactions = [_]unions.Reaction{};
     try ctx.exec(functions.messages.SendReaction{
         .peer = peer,
         .msg_id = msg_id,
@@ -165,7 +166,7 @@ pub fn removeReaction(ctx: Context, peer: types.InputPeer, msg_id: i32) !void {
 }
 
 /// Extract the message id from a SendMessage/SendMedia response. null for unexpected shapes.
-pub fn sentMessageId(updates: types.Updates) ?i32 {
+pub fn sentMessageId(updates: unions.Updates) ?i32 {
     return switch (updates) {
         .Updates => |u| blk: {
             for (u.updates) |upd| {
@@ -179,13 +180,13 @@ pub fn sentMessageId(updates: types.Updates) ?i32 {
 }
 
 /// Fetch full user objects for the given ids.
-pub fn getUsers(ctx: Context, ids: []const types.InputUser) !Context.Response([]const types.User) {
+pub fn getUsers(ctx: Context, ids: []const unions.InputUser) !Context.Response([]const unions.User) {
     const resp = try ctx.call(functions.users.GetUsers{ .id = ids });
     return .{ .arena = resp.arena, .value = resp.value };
 }
 
 /// Fetch full chat objects for the given ids.
-pub fn getChats(ctx: Context, ids: []const i64) !Context.Response([]const types.Chat) {
+pub fn getChats(ctx: Context, ids: []const i64) !Context.Response([]const unions.Chat) {
     const resp = try ctx.call(functions.messages.GetChats{ .id = ids });
     const chats = switch (resp.value) {
         .MessagesChats => |r| r.chats,
@@ -195,7 +196,7 @@ pub fn getChats(ctx: Context, ids: []const i64) !Context.Response([]const types.
 }
 
 /// Fetch full channel objects for the given ids.
-pub fn getChannels(ctx: Context, ids: []const types.InputChannel) !Context.Response([]const types.Chat) {
+pub fn getChannels(ctx: Context, ids: []const unions.InputChannel) !Context.Response([]const unions.Chat) {
     const resp = try ctx.call(functions.channels.GetChannels{ .id = ids });
     const chats = switch (resp.value) {
         .MessagesChats => |r| r.chats,
@@ -205,7 +206,7 @@ pub fn getChannels(ctx: Context, ids: []const types.InputChannel) !Context.Respo
 }
 
 /// Resolve the peer from a callback query's peer field using the update's entity cache.
-pub fn peerFromCallbackQuery(entities: Context.Entities, update: types.UpdateBotCallbackQuery) ?types.InputPeer {
+pub fn peerFromCallbackQuery(entities: Context.Entities, update: types.UpdateBotCallbackQuery) ?unions.InputPeer {
     return switch (update.peer) {
         .PeerUser => |p| .{ .InputPeerUser = .{
             .user_id = p.user_id,

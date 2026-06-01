@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("types");
+const unions = @import("unions");
 const functions = @import("functions");
 const client = @import("../Context.zig");
 const File = @import("../File.zig");
@@ -72,7 +73,7 @@ pub fn sendDocument(msg: Msg, data: []const u8, mime_type: []const u8, opts: Sen
         .InputFile => |f| msg.ctx.allocator.free(f.md5_checksum),
         .InputFileBig, .InputFileStoryDocument => {},
     };
-    var attrs = [_]types.DocumentAttribute{.{ .DocumentAttributeFilename = .{ .file_name = "file" } }};
+    var attrs = [_]unions.DocumentAttribute{.{ .DocumentAttributeFilename = .{ .file_name = "file" } }};
     try msg.ctx.exec(functions.messages.SendMedia{
         .peer = peer,
         .media = .{ .InputMediaUploadedDocument = .{
@@ -92,7 +93,7 @@ pub fn sendAudio(msg: Msg, data: []const u8, mime_type: []const u8, opts: AudioO
         .InputFile => |f| msg.ctx.allocator.free(f.md5_checksum),
         .InputFileBig, .InputFileStoryDocument => {},
     };
-    var attrs = [_]types.DocumentAttribute{.{ .DocumentAttributeAudio = .{
+    var attrs = [_]unions.DocumentAttribute{.{ .DocumentAttributeAudio = .{
         .duration = opts.duration,
         .title = if (opts.title) |t| .some(t) else .none,
         .performer = if (opts.performer) |p| .some(p) else .none,
@@ -116,7 +117,7 @@ pub fn sendVideo(msg: Msg, data: []const u8, mime_type: []const u8, opts: VideoO
         .InputFile => |f| msg.ctx.allocator.free(f.md5_checksum),
         .InputFileBig, .InputFileStoryDocument => {},
     };
-    var attrs = [_]types.DocumentAttribute{.{ .DocumentAttributeVideo = .{
+    var attrs = [_]unions.DocumentAttribute{.{ .DocumentAttributeVideo = .{
         .supports_streaming = if (opts.supports_streaming) .some({}) else .none,
         .duration = opts.duration,
         .w = opts.w,
@@ -141,7 +142,7 @@ pub fn sendVoice(msg: Msg, data: []const u8, opts: VoiceOptions) !void {
         .InputFile => |f| msg.ctx.allocator.free(f.md5_checksum),
         .InputFileBig, .InputFileStoryDocument => {},
     };
-    var attrs = [_]types.DocumentAttribute{.{ .DocumentAttributeAudio = .{
+    var attrs = [_]unions.DocumentAttribute{.{ .DocumentAttributeAudio = .{
         .voice = .some({}),
         .duration = opts.duration,
     } }};
@@ -167,7 +168,7 @@ pub fn sendAlbum(msg: Msg, items: []const AlbumItem, opts: AlbumOptions) !void {
     defer allocator.free(checksums);
     defer for (checksums) |c| if (c) |s| allocator.free(s);
     @memset(checksums, null);
-    const attrs_buf = try allocator.alloc(types.DocumentAttribute, items.len);
+    const attrs_buf = try allocator.alloc(unions.DocumentAttribute, items.len);
     defer allocator.free(attrs_buf);
 
     // Each staged response owns the file_reference bytes referenced by media_items,
@@ -181,7 +182,7 @@ pub fn sendAlbum(msg: Msg, items: []const AlbumItem, opts: AlbumOptions) !void {
     for (items, 0..) |item, i| {
         const input_file = try File.upload(msg.ctx, item.data, item.name);
         if (input_file == .InputFile) checksums[i] = input_file.InputFile.md5_checksum;
-        const uploaded: types.InputMedia = switch (item.kind) {
+        const uploaded: unions.InputMedia = switch (item.kind) {
             .photo => .{ .InputMediaUploadedPhoto = .{ .file = input_file } },
             .document => blk: {
                 attrs_buf[i] = .{ .DocumentAttributeFilename = .{ .file_name = item.name } };
@@ -197,7 +198,7 @@ pub fn sendAlbum(msg: Msg, items: []const AlbumItem, opts: AlbumOptions) !void {
         staged_responses[staged_count] = try msg.ctx.call(functions.messages.UploadMedia{ .peer = peer, .media = uploaded });
         const staged = staged_responses[staged_count].value;
         staged_count += 1;
-        const media: types.InputMedia = switch (staged) {
+        const media: unions.InputMedia = switch (staged) {
             .MessageMediaPhoto => |m| blk: {
                 const p = switch (m.photo.value orelse return error.NoPhoto) {
                     .Photo => |p| p,
