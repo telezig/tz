@@ -454,6 +454,7 @@ pub fn Client(comptime handlers: []const Handler) type {
                         .callFn = callImpl,
                         .callFileFn = callFileImpl,
                         .callCdnFn = callCdnImpl,
+                        .loginQrFn = loginQrImpl,
                     });
                     self.user_authorized = true;
                     self.markHomeDc(io);
@@ -678,6 +679,117 @@ pub fn Client(comptime handlers: []const Handler) type {
             }
         }
 
+        fn buildQrUrl(allocator: std.mem.Allocator, token: []const u8) ![]u8 {
+            const prefix = "tg://login?token=";
+            const enc = &std.base64.url_safe_no_pad.Encoder;
+            const buf = try allocator.alloc(u8, prefix.len + enc.calcSize(token.len));
+            @memcpy(buf[0..prefix.len], prefix);
+            _ = enc.encode(buf[prefix.len..], token);
+            return buf;
+        }
+
+        fn loginQrImpl(ptr: *anyopaque, io: Io, on_token: *const fn (url: []const u8) anyerror!void) anyerror!void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            while (true) {
+                const resp = try self.call(io, functions.auth.ExportLoginToken{
+                    .api_id = self.opts.api_id,
+                    .api_hash = self.opts.api_hash,
+                    .except_ids = &.{},
+                });
+                defer resp.deinit();
+                switch (resp.value) {
+                    .AuthLoginToken => |t| {
+                        const url = try buildQrUrl(self.allocator, t.token);
+                        defer self.allocator.free(url);
+                        try on_token(url);
+                        const now_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
+                        const now_s: i64 = @intCast(@divTrunc(now_ns, std.time.ns_per_s));
+                        const secs: i64 = @max(0, @as(i64, t.expires) - now_s);
+                        std.Io.sleep(io, std.Io.Duration.fromSeconds(secs), .awake) catch {};
+                    },
+                    .AuthLoginTokenMigrateTo => |m| {
+                        try self.importQrTokenViaDc(io, @intCast(m.dc_id), m.token);
+                        return;
+                    },
+                    .AuthLoginTokenSuccess => return,
+                }
+            }
+        }
+
+        fn importQrTokenViaDc(self: *Self, io: Io, dc_id: u8, token: []const u8) !void {
+            const dc = self.findDc(dc_id) orelse return error.DcNotFound;
+
+            const mem = try self.allocator.create(Storage.Memory);
+            mem.* = .{};
+            errdefer {
+                mem.deinit(self.allocator);
+                self.allocator.destroy(mem);
+            }
+
+            const conn = try Connector.connect(io, self.allocator, .{
+                .dc = dc,
+                .transport = .abridged,
+                .storage = mem.storage(),
+                .api_id = self.opts.api_id,
+                .api_hash = self.opts.api_hash,
+            });
+            errdefer conn.deinit();
+            try conn.run(io, sub_conn_noop_handler);
+            errdefer {
+                conn.close(io);
+                conn.join(io);
+            }
+
+            // importLoginToken on the target DC
+            {
+                const bytes = try codec.encodeAlloc(
+                    functions.auth.ImportLoginToken{ .token = token },
+                    self.allocator,
+                );
+                defer self.allocator.free(bytes);
+                const raw = try self.callViaConnector(io, conn, bytes);
+                defer self.allocator.free(raw);
+                if (isRpcError(raw)) return error.RpcError;
+            }
+
+            // Export auth from target DC back to our primary DC so the primary is also authenticated.
+            const primary_dc_id = if (self.primary) |p| p.dc_id else {
+                conn.close(io);
+                conn.join(io);
+                conn.deinit();
+                mem.deinit(self.allocator);
+                self.allocator.destroy(mem);
+                return;
+            };
+            var export_buf: [32]u8 = undefined;
+            var ew: std.Io.Writer = .fixed(&export_buf);
+            try codec.encode(functions.auth.ExportAuthorization{ .dc_id = @intCast(primary_dc_id) }, &ew);
+            const export_raw = try self.callViaConnector(io, conn, ew.buffered());
+            defer self.allocator.free(export_raw);
+
+            conn.close(io);
+            conn.join(io);
+            conn.deinit();
+            mem.deinit(self.allocator);
+            self.allocator.destroy(mem);
+
+            if (isRpcError(export_raw)) return error.AuthTransferFailed;
+
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            var r: std.Io.Reader = .fixed(export_raw);
+            const exported = try codec.decode(types.AuthExportedAuthorization, &r, arena.allocator());
+
+            const import_bytes = try codec.encodeAlloc(
+                functions.auth.ImportAuthorization{ .id = exported.id, .bytes = exported.bytes },
+                self.allocator,
+            );
+            defer self.allocator.free(import_bytes);
+            const import_raw = try self.callRaw(io, import_bytes);
+            defer self.allocator.free(import_raw);
+            if (isRpcError(import_raw)) return error.AuthTransferFailed;
+        }
+
         fn findDc(self: *const Self, dc_id: u8) ?Connector.DC {
             if (self.dc_list) |list| {
                 for (list) |dc| {
@@ -775,6 +887,7 @@ pub fn Client(comptime handlers: []const Handler) type {
                 .callFn = callImpl,
                 .callFileFn = callFileImpl,
                 .callCdnFn = callCdnImpl,
+                .loginQrFn = loginQrImpl,
             };
 
             for (updates) |u| {

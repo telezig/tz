@@ -20,6 +20,7 @@ callFn: *const fn (client: *anyopaque, io: Io, bytes: []const u8) anyerror![]u8,
 callFileFn: *const fn (client: *anyopaque, io: Io, bytes: []const u8) anyerror![]u8,
 /// Routes to a CDN DC sub-connection (no account auth required).
 callCdnFn: *const fn (client: *anyopaque, io: Io, dc_id: i32, bytes: []const u8) anyerror![]u8,
+loginQrFn: *const fn (client: *anyopaque, io: Io, on_token: *const fn (url: []const u8) anyerror!void) anyerror!void,
 
 pub fn call(self: Context, request: anytype) !Response(@TypeOf(request).Response) {
     const bytes = try codec.encodeAlloc(request, self.allocator);
@@ -42,6 +43,13 @@ pub fn callFile(self: Context, request: anytype) !Response(@TypeOf(request).Resp
     const raw = try self.callFileFn(self.client, self.io, bytes);
     defer self.allocator.free(raw);
     return decodeOwned(@TypeOf(request).Response, raw, self.allocator);
+}
+
+/// Poll for a QR login token and call on_token each time a fresh token is ready.
+/// The url is valid for the duration of the callback. Returns when login succeeds.
+/// on_token receives a "tg://login?token=..." URL for the caller to display as a QR code.
+pub fn loginQr(self: Context, on_token: *const fn (url: []const u8) anyerror!void) !void {
+    return self.loginQrFn(self.client, self.io, on_token);
 }
 
 pub fn callCdn(self: Context, dc_id: i32, request: anytype) !Response(@TypeOf(request).Response) {

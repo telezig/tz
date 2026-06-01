@@ -69,6 +69,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "any_call", .extra_imports = &.{} },
         .{ .name = "feature_demo", .extra_imports = &.{} },
         .{ .name = "user_login", .extra_imports = &.{.{ .name = "functions", .module = functions_module }} },
+        .{ .name = "qr_login", .extra_imports = &.{} },
     };
     for (examples) |ex| {
         const imports = b.allocator.alloc(std.Build.Module.Import, 1 + ex.extra_imports.len) catch @panic("oom");

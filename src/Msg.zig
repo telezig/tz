@@ -14,7 +14,7 @@ raw: Raw,
 
 /// Register a fn(Msg) !void as a Handler for UpdateNewMessage.
 /// Filters non-Message variants (empty/service) silently.
-pub fn handler(comptime cb: fn(Msg) anyerror!void) client.Handler {
+pub fn handler(comptime cb: fn (Msg) anyerror!void) client.Handler {
     return client.handler(types.UpdateNewMessage, struct {
         fn dispatch(ctx: Context, update: types.UpdateNewMessage) anyerror!void {
             const msg = from(ctx, update) orelse return;
