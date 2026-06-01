@@ -23,6 +23,7 @@ pub fn handler(comptime cb: fn (Msg) anyerror!void) client.Handler {
     }.dispatch);
 }
 
+/// Unwrap an UpdateNewMessage into a Msg. returns null for service/empty variants.
 pub fn from(ctx: Context, update: types.UpdateNewMessage) ?Msg {
     return switch (update.message) {
         .Message => |m| .{ .ctx = ctx, .raw = m },
@@ -30,32 +31,37 @@ pub fn from(ctx: Context, update: types.UpdateNewMessage) ?Msg {
     };
 }
 
-// --- Accessors (no switch — raw is already the concrete struct) ---
-
+/// Message text.
 pub fn text(self: Msg) []const u8 {
     return self.raw.message;
 }
 
+/// True if text equals s exactly.
 pub fn is(self: Msg, s: []const u8) bool {
     return std.mem.eql(u8, self.raw.message, s);
 }
 
+/// True if text starts with s.
 pub fn prefix(self: Msg, s: []const u8) bool {
     return std.mem.startsWith(u8, self.raw.message, s);
 }
 
+/// True if text contains s.
 pub fn contains(self: Msg, s: []const u8) bool {
     return std.mem.indexOf(u8, self.raw.message, s) != null;
 }
 
+/// Message id.
 pub fn id(self: Msg) i32 {
     return self.raw.id;
 }
 
+/// Unix timestamp of the message.
 pub fn date(self: Msg) i32 {
     return self.raw.date;
 }
 
+/// Sender user id. null for channels and anonymous posts.
 pub fn senderId(self: Msg) ?i64 {
     const from_id = self.raw.from_id.value orelse {
         // Private chats omit from_id since layer 119; sender is the peer.
@@ -67,6 +73,7 @@ pub fn senderId(self: Msg) ?i64 {
     };
 }
 
+/// Id of the message being replied to, if any.
 pub fn replyToId(self: Msg) ?i32 {
     const rt = self.raw.reply_to.value orelse return null;
     return switch (rt) {
@@ -75,6 +82,7 @@ pub fn replyToId(self: Msg) ?i32 {
     };
 }
 
+/// Download location for the attached photo or document. null if no media.
 pub fn mediaLocation(self: Msg) ?types.InputFileLocation {
     const med = self.raw.media.value orelse return null;
     return switch (med) {
@@ -99,8 +107,6 @@ pub fn peer(self: Msg) ?types.InputPeer {
         },
     };
 }
-
-// --- Active operations ---
 
 /// Send a plain-text message to the same peer without a reply thread.
 pub fn respond(self: Msg, txt: []const u8) !void {

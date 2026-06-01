@@ -14,7 +14,7 @@ pub const upload = File.upload;
 pub const documentLocation = File.documentLocation;
 pub const photoLocation = File.photoLocation;
 
-/// Download an entire file into a heap-allocated buffer. Caller frees with ctx.allocator.
+/// Download an entire file into a heap-allocated buffer. caller frees with ctx.allocator.
 pub fn download(ctx: Context, location: types.InputFileLocation) ![]u8 {
     var f = File.init(ctx, location);
     defer f.deinit();
@@ -46,6 +46,7 @@ pub const InlineQueryOptions = struct {
     next_offset: ?[]const u8 = null,
 };
 
+/// Forward messages by id from one peer to another.
 pub fn forwardMessages(ctx: Context, from_peer: types.InputPeer, to_peer: types.InputPeer, ids: []i32) !void {
     const random_ids = try ctx.allocator.alloc(i64, ids.len);
     defer ctx.allocator.free(random_ids);
@@ -58,6 +59,7 @@ pub fn forwardMessages(ctx: Context, from_peer: types.InputPeer, to_peer: types.
     });
 }
 
+/// Pin or unpin a message. set opts.unpin to unpin.
 pub fn pinMessage(ctx: Context, peer: types.InputPeer, msg_id: i32, opts: PinOptions) !void {
     try ctx.exec(functions.messages.UpdatePinnedMessage{
         .peer = peer,
@@ -68,6 +70,7 @@ pub fn pinMessage(ctx: Context, peer: types.InputPeer, msg_id: i32, opts: PinOpt
     });
 }
 
+/// Edit text and/or reply markup of a message.
 pub fn editMessage(ctx: Context, peer: types.InputPeer, msg_id: i32, opts: EditOptions) !void {
     try ctx.exec(functions.messages.EditMessage{
         .peer = peer,
@@ -77,6 +80,7 @@ pub fn editMessage(ctx: Context, peer: types.InputPeer, msg_id: i32, opts: EditO
     });
 }
 
+/// Delete a message. revokes for all participants where possible.
 pub fn deleteMessage(ctx: Context, peer: types.InputPeer, msg_id: i32) !void {
     var ids = [_]i32{msg_id};
     switch (peer) {
@@ -94,16 +98,19 @@ pub fn deleteMessage(ctx: Context, peer: types.InputPeer, msg_id: i32) !void {
     }
 }
 
+/// Show a typing indicator or other chat action.
 pub fn sendChatAction(ctx: Context, peer: types.InputPeer, action: types.SendMessageAction) !void {
     try ctx.exec(functions.messages.SetTyping{ .peer = peer, .action = action });
 }
 
+/// Fetch the bot/user's own account info.
 pub fn getMe(ctx: Context) !Context.Response([]const types.User) {
     var id = [_]types.InputUser{.{ .InputUserSelf = .{} }};
     const resp = try ctx.call(functions.users.GetUsers{ .id = &id });
     return .{ .arena = resp.arena, .value = resp.value };
 }
 
+/// Answer an inline button callback query.
 pub fn answerCallbackQuery(ctx: Context, update: types.UpdateBotCallbackQuery, opts: CallbackAnswerOptions) !void {
     try ctx.exec(functions.messages.SetBotCallbackAnswer{
         .alert = if (opts.alert) .some({}) else .none,
@@ -114,6 +121,7 @@ pub fn answerCallbackQuery(ctx: Context, update: types.UpdateBotCallbackQuery, o
     });
 }
 
+/// Answer a callback query from an inline message button.
 pub fn answerInlineCallbackQuery(ctx: Context, update: types.UpdateInlineBotCallbackQuery, opts: CallbackAnswerOptions) !void {
     try ctx.exec(functions.messages.SetBotCallbackAnswer{
         .alert = if (opts.alert) .some({}) else .none,
@@ -124,6 +132,7 @@ pub fn answerInlineCallbackQuery(ctx: Context, update: types.UpdateInlineBotCall
     });
 }
 
+/// Answer an inline query with a list of results.
 pub fn answerInlineQuery(ctx: Context, update: types.UpdateBotInlineQuery, results: []const types.InputBotInlineResult, opts: InlineQueryOptions) !void {
     try ctx.exec(functions.messages.SetInlineBotResults{
         .gallery = if (opts.is_gallery) .some({}) else .none,
@@ -135,6 +144,7 @@ pub fn answerInlineQuery(ctx: Context, update: types.UpdateBotInlineQuery, resul
     });
 }
 
+/// Add an emoji reaction to a message.
 pub fn addReaction(ctx: Context, peer: types.InputPeer, msg_id: i32, emoticon: []const u8) !void {
     var reactions = [_]types.Reaction{.{ .ReactionEmoji = .{ .emoticon = emoticon } }};
     try ctx.exec(functions.messages.SendReaction{
@@ -144,6 +154,7 @@ pub fn addReaction(ctx: Context, peer: types.InputPeer, msg_id: i32, emoticon: [
     });
 }
 
+/// Remove all reactions from a message.
 pub fn removeReaction(ctx: Context, peer: types.InputPeer, msg_id: i32) !void {
     var reactions = [_]types.Reaction{};
     try ctx.exec(functions.messages.SendReaction{
@@ -153,7 +164,7 @@ pub fn removeReaction(ctx: Context, peer: types.InputPeer, msg_id: i32) !void {
     });
 }
 
-/// Extract the message id from a SendMessage/SendMedia Updates response.
+/// Extract the message id from a SendMessage/SendMedia response. null for unexpected shapes.
 pub fn sentMessageId(updates: types.Updates) ?i32 {
     return switch (updates) {
         .Updates => |u| blk: {
@@ -167,11 +178,13 @@ pub fn sentMessageId(updates: types.Updates) ?i32 {
     };
 }
 
+/// Fetch full user objects for the given ids.
 pub fn getUsers(ctx: Context, ids: []const types.InputUser) !Context.Response([]const types.User) {
     const resp = try ctx.call(functions.users.GetUsers{ .id = ids });
     return .{ .arena = resp.arena, .value = resp.value };
 }
 
+/// Fetch full chat objects for the given ids.
 pub fn getChats(ctx: Context, ids: []const i64) !Context.Response([]const types.Chat) {
     const resp = try ctx.call(functions.messages.GetChats{ .id = ids });
     const chats = switch (resp.value) {
@@ -181,6 +194,7 @@ pub fn getChats(ctx: Context, ids: []const i64) !Context.Response([]const types.
     return .{ .arena = resp.arena, .value = chats };
 }
 
+/// Fetch full channel objects for the given ids.
 pub fn getChannels(ctx: Context, ids: []const types.InputChannel) !Context.Response([]const types.Chat) {
     const resp = try ctx.call(functions.channels.GetChannels{ .id = ids });
     const chats = switch (resp.value) {
@@ -190,6 +204,7 @@ pub fn getChannels(ctx: Context, ids: []const types.InputChannel) !Context.Respo
     return .{ .arena = resp.arena, .value = chats };
 }
 
+/// Resolve the peer from a callback query's peer field using the update's entity cache.
 pub fn peerFromCallbackQuery(entities: Context.Entities, update: types.UpdateBotCallbackQuery) ?types.InputPeer {
     return switch (update.peer) {
         .PeerUser => |p| .{ .InputPeerUser = .{

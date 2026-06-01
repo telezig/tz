@@ -22,6 +22,7 @@ callFileFn: *const fn (client: *anyopaque, io: Io, bytes: []const u8) anyerror![
 callCdnFn: *const fn (client: *anyopaque, io: Io, dc_id: i32, bytes: []const u8) anyerror![]u8,
 loginQrFn: *const fn (client: *anyopaque, io: Io, on_token: *const fn (url: []const u8) anyerror!void) anyerror!void,
 
+/// Send a TL request and return the decoded response. caller owns it; free with resp.deinit().
 pub fn call(self: Context, request: anytype) !Response(@TypeOf(request).Response) {
     const bytes = try codec.encodeAlloc(request, self.allocator);
     defer self.allocator.free(bytes);
@@ -30,6 +31,7 @@ pub fn call(self: Context, request: anytype) !Response(@TypeOf(request).Response
     return decodeOwned(@TypeOf(request).Response, raw, self.allocator);
 }
 
+/// Send a TL request and discard the response.
 pub fn exec(self: Context, request: anytype) !void {
     const bytes = try codec.encodeAlloc(request, self.allocator);
     defer self.allocator.free(bytes);
@@ -37,6 +39,7 @@ pub fn exec(self: Context, request: anytype) !void {
     self.allocator.free(raw);
 }
 
+/// Like call, but routes FILE_MIGRATE errors to a sub-connection automatically.
 pub fn callFile(self: Context, request: anytype) !Response(@TypeOf(request).Response) {
     const bytes = try codec.encodeAlloc(request, self.allocator);
     defer self.allocator.free(bytes);
@@ -45,13 +48,13 @@ pub fn callFile(self: Context, request: anytype) !Response(@TypeOf(request).Resp
     return decodeOwned(@TypeOf(request).Response, raw, self.allocator);
 }
 
-/// Poll for a QR login token and call on_token each time a fresh token is ready.
-/// The url is valid for the duration of the callback. Returns when login succeeds.
-/// on_token receives a "tg://login?token=..." URL for the caller to display as a QR code.
+/// QR login. calls on_token with a `tg://login?token=...` url on each token refresh.
+/// Blocks until approved.
 pub fn loginQr(self: Context, on_token: *const fn (url: []const u8) anyerror!void) !void {
     return self.loginQrFn(self.client, self.io, on_token);
 }
 
+/// Send a request to a CDN DC sub-connection (no account auth required).
 pub fn callCdn(self: Context, dc_id: i32, request: anytype) !Response(@TypeOf(request).Response) {
     const bytes = try codec.encodeAlloc(request, self.allocator);
     defer self.allocator.free(bytes);
@@ -60,6 +63,7 @@ pub fn callCdn(self: Context, dc_id: i32, request: anytype) !Response(@TypeOf(re
     return decodeOwned(@TypeOf(request).Response, raw, self.allocator);
 }
 
+/// Like exec, but routes FILE_MIGRATE errors to a sub-connection automatically.
 pub fn execFile(self: Context, request: anytype) !void {
     const bytes = try codec.encodeAlloc(request, self.allocator);
     defer self.allocator.free(bytes);
@@ -67,12 +71,14 @@ pub fn execFile(self: Context, request: anytype) !void {
     self.allocator.free(raw);
 }
 
+/// Look up a peer by user/channel id from the session cache. null if not seen yet.
 pub fn resolvePeer(self: Context, id: i64) ?types.InputPeer {
     self.mb_mutex.lockUncancelable(self.io);
     defer self.mb_mutex.unlock(self.io);
     return self.peer_cache.inputPeer(id);
 }
 
+/// Look up a channel by id from the session cache. null if not seen yet.
 pub fn resolveInputChannel(self: Context, id: i64) ?types.InputChannel {
     self.mb_mutex.lockUncancelable(self.io);
     defer self.mb_mutex.unlock(self.io);

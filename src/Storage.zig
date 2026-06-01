@@ -2,6 +2,7 @@ const Storage = @This();
 const std = @import("std");
 const Io = std.Io;
 
+/// Auth key and metadata for one DC. extern layout so it round-trips through raw file i/o.
 pub const SessionData = extern struct {
     auth_key: [256]u8,
     auth_key_id: i64,
@@ -25,15 +26,19 @@ pub const VTable = struct {
     saveUpdateState: *const fn (*anyopaque, Io, std.mem.Allocator, []const u8) anyerror!void,
 };
 
+/// Load session for dc_id. null if none exists or auth key is blank.
 pub fn load(self: Storage, io: Io, gpa: std.mem.Allocator, dc_id: u8) !?SessionData {
     return self.vtable.load(self.ptr, io, gpa, dc_id);
 }
+/// Persist a session. keyed by data.dc_id.
 pub fn save(self: Storage, io: Io, gpa: std.mem.Allocator, data: SessionData) !void {
     return self.vtable.save(self.ptr, io, gpa, data);
 }
+/// Load the opaque update-state blob. caller owns the returned slice.
 pub fn loadUpdateState(self: Storage, io: Io, gpa: std.mem.Allocator) !?[]u8 {
     return self.vtable.loadUpdateState(self.ptr, io, gpa);
 }
+/// Persist the update-state blob. replaces any previously saved value.
 pub fn saveUpdateState(self: Storage, io: Io, gpa: std.mem.Allocator, bytes: []const u8) !void {
     return self.vtable.saveUpdateState(self.ptr, io, gpa, bytes);
 }
@@ -112,15 +117,16 @@ fn writeAll(io: Io, path: []const u8, parsed: Parsed) !void {
     if (parsed.update_state) |b| try file.writePositionalAll(io, b, off);
 }
 
+/// In-memory storage. sessions and update state are lost on process exit. useful for tests and CDN sub-connections.
 pub const Memory = struct {
     slots: [numSlots]?SessionData = .{null} ** numSlots,
     update_state: ?[]u8 = null,
 
+    /// Vtable-backed Storage handle. the Memory must outlive it.
     pub fn storage(self: *Memory) Storage {
         return .{ .ptr = self, .vtable = &vtable };
     }
-    /// Frees the retained update-state blob. Pass the same allocator used for
-    /// saveUpdateState.
+    /// Frees the retained update-state blob. pass the same allocator used for saveUpdateState.
     pub fn deinit(self: *Memory, gpa: std.mem.Allocator) void {
         if (self.update_state) |b| gpa.free(b);
         self.update_state = null;
@@ -160,9 +166,11 @@ pub const File = struct {
     path: []const u8,
     mu: std.Io.Mutex = .init,
 
+    /// Path is borrowed — must outlive the File.
     pub fn init(path: []const u8) File {
         return .{ .path = path };
     }
+    /// Vtable-backed Storage handle. the File must outlive it.
     pub fn storage(self: *File) Storage {
         return .{ .ptr = self, .vtable = &vtable };
     }
