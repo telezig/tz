@@ -120,6 +120,10 @@ pub fn encrypt(self: *Session, plaintext: []const u8, allocator: Allocator, io: 
     return .{ .data = out, .msg_id = msg_id };
 }
 
+/// `payload` borrows `decrypt_scratch` and is only valid until the next `decrypt`
+/// call. The sole caller (readLoop) consumes it synchronously before reading the
+/// next frame; anything that outlives that window (async update dispatch, rpc
+/// results) must copy it.
 pub const DecryptResult = struct { payload: []u8, msg_id: i64 };
 
 pub fn decrypt(self: *Session, ciphertext: []const u8, allocator: Allocator) !DecryptResult {
@@ -146,7 +150,7 @@ pub fn decrypt(self: *Session, ciphertext: []const u8, allocator: Allocator) !De
     const msg_id = std.mem.readInt(i64, inner[16..24], .little);
     const payload_len = std.mem.readInt(u32, inner[28..32], .little);
     if (32 + payload_len > inner.len) return error.BadLength;
-    return .{ .payload = try allocator.dupe(u8, inner[32..][0..payload_len]), .msg_id = msg_id };
+    return .{ .payload = inner[32..][0..payload_len], .msg_id = msg_id };
 }
 
 test "message encrypt/decrypt roundtrip" {
@@ -200,7 +204,7 @@ test "message encrypt/decrypt roundtrip" {
     @memcpy(server_msg[8..24], msg_key);
     @memcpy(server_msg[24..], inner);
 
+    // payload borrows session.decrypt_scratch (freed by session.deinit); don't free it here.
     const decrypted = try session.decrypt(server_msg, allocator);
-    defer allocator.free(decrypted.payload);
     try std.testing.expectEqualSlices(u8, plaintext, decrypted.payload);
 }

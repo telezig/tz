@@ -173,11 +173,12 @@ pub fn MtProto(comptime Handler: type) type {
                     std.log.warn("readLoop: server transport error: {}", .{code});
                     continue;
                 }
+                // payload borrows session.decrypt_scratch; valid only until the next
+                // decrypt. dispatch consumes it synchronously (async paths copy it).
                 const decrypted = self.session.decrypt(frame, self.allocator) catch |e| {
                     std.log.debug("readLoop: decrypt failed: {} (frame_len={})", .{ e, frame.len });
                     continue;
                 };
-                defer self.allocator.free(decrypted.payload);
                 self.dispatch(io, decrypted.payload, decrypted.msg_id) catch |err| std.log.debug("dispatch: {}", .{err});
                 self.flushAcks(io);
             }
