@@ -23,28 +23,29 @@ callFileFn: *const fn (client: *anyopaque, io: Io, bytes: []const u8) anyerror![
 callCdnFn: *const fn (client: *anyopaque, io: Io, dc_id: i32, bytes: []const u8) anyerror![]u8,
 loginQrFn: *const fn (client: *anyopaque, io: Io, on_token: *const fn (url: []const u8) anyerror!void) anyerror!void,
 
-/// Send a TL request and return the decoded response. caller owns it; free with resp.deinit().
-pub fn call(self: Context, request: anytype) !Response(@TypeOf(request).Response) {
+/// Encode `request`, send it through `callFn`, and return the owned raw response
+/// bytes. Caller frees with `self.allocator.free`.
+fn invoke(self: Context, callFn: anytype, request: anytype) ![]u8 {
     const bytes = try codec.encodeAlloc(request, self.allocator);
     defer self.allocator.free(bytes);
-    const raw = try self.callFn(self.client, self.io, bytes);
+    return callFn(self.client, self.io, bytes);
+}
+
+/// Send a TL request and return the decoded response. caller owns it; free with resp.deinit().
+pub fn call(self: Context, request: anytype) !Response(@TypeOf(request).Response) {
+    const raw = try self.invoke(self.callFn, request);
     defer self.allocator.free(raw);
     return decodeOwned(@TypeOf(request).Response, raw, self.allocator);
 }
 
 /// Send a TL request and discard the response.
 pub fn exec(self: Context, request: anytype) !void {
-    const bytes = try codec.encodeAlloc(request, self.allocator);
-    defer self.allocator.free(bytes);
-    const raw = try self.callFn(self.client, self.io, bytes);
-    self.allocator.free(raw);
+    self.allocator.free(try self.invoke(self.callFn, request));
 }
 
 /// Like call, but routes FILE_MIGRATE errors to a sub-connection automatically.
 pub fn callFile(self: Context, request: anytype) !Response(@TypeOf(request).Response) {
-    const bytes = try codec.encodeAlloc(request, self.allocator);
-    defer self.allocator.free(bytes);
-    const raw = try self.callFileFn(self.client, self.io, bytes);
+    const raw = try self.invoke(self.callFileFn, request);
     defer self.allocator.free(raw);
     return decodeOwned(@TypeOf(request).Response, raw, self.allocator);
 }
@@ -66,10 +67,7 @@ pub fn callCdn(self: Context, dc_id: i32, request: anytype) !Response(@TypeOf(re
 
 /// Like exec, but routes FILE_MIGRATE errors to a sub-connection automatically.
 pub fn execFile(self: Context, request: anytype) !void {
-    const bytes = try codec.encodeAlloc(request, self.allocator);
-    defer self.allocator.free(bytes);
-    const raw = try self.callFileFn(self.client, self.io, bytes);
-    self.allocator.free(raw);
+    self.allocator.free(try self.invoke(self.callFileFn, request));
 }
 
 /// Look up a peer by user/channel id from the session cache. null if not seen yet.
