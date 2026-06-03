@@ -162,34 +162,16 @@ pub fn Client(comptime handlers: []const Handler) type {
         pub fn call(self: *Self, io: Io, request: anytype) !Response(@TypeOf(request).Response) {
             const bytes = try codec.encodeAlloc(request, self.allocator);
             defer self.allocator.free(bytes);
-            var attempt: u32 = 0;
-            while (true) : (attempt += 1) {
-                const raw = try self.callRaw(io, bytes);
-                if (!isRpcError(raw)) {
-                    defer self.allocator.free(raw);
-                    return decodeOwned(@TypeOf(request).Response, raw, self.allocator);
-                }
-                const r = self.handleRpcError(io, raw, attempt + 1 < self.opts.max_rpc_retries);
-                self.allocator.free(raw);
-                try r; // void => retryable (already slept); error => surface
-            }
+            const raw = try callImpl(self, io, bytes);
+            defer self.allocator.free(raw);
+            return decodeOwned(@TypeOf(request).Response, raw, self.allocator);
         }
 
         /// Send a typed TL request, discard the response.
         pub fn exec(self: *Self, io: Io, request: anytype) !void {
             const bytes = try codec.encodeAlloc(request, self.allocator);
             defer self.allocator.free(bytes);
-            var attempt: u32 = 0;
-            while (true) : (attempt += 1) {
-                const raw = try self.callRaw(io, bytes);
-                if (!isRpcError(raw)) {
-                    self.allocator.free(raw);
-                    return;
-                }
-                const r = self.handleRpcError(io, raw, attempt + 1 < self.opts.max_rpc_retries);
-                self.allocator.free(raw);
-                try r;
-            }
+            self.allocator.free(try callImpl(self, io, bytes));
         }
 
         /// Retry engine behind `Context.call`/`exec` (handler/auth path). Returns the
@@ -989,20 +971,25 @@ pub fn Client(comptime handlers: []const Handler) type {
             try self.routeUpdates(io, arena_alloc, .{ .date = upd.date, .updates = &updates }, &.{}, &.{});
         }
 
-        fn dispatchShortMessage(self: *Self, io: Io, payload: []const u8) !void {
-            var arena = std.heap.ArenaAllocator.init(self.allocator);
-            defer arena.deinit();
-            const arena_alloc = arena.allocator();
-            var r: std.Io.Reader = .fixed(payload[4..]);
-            const short = try codec.decodeStructBody(types.UpdateShortMessage, &r, arena_alloc);
+        /// Synthesize an `UpdateNewMessage` from a decoded short(-chat)-message and
+        /// route it. `short` carries the shared message fields; `from_id`/`peer_id`
+        /// differ between the user and chat variants and are supplied by the caller.
+        fn routeShortMessage(
+            self: *Self,
+            io: Io,
+            arena_alloc: Allocator,
+            short: anytype,
+            from_id: @FieldType(types.Message, "from_id"),
+            peer_id: @FieldType(types.Message, "peer_id"),
+        ) !void {
             const msg = types.Message{
                 .id = short.id,
                 .out = short.out,
                 .mentioned = short.mentioned,
                 .media_unread = short.media_unread,
                 .silent = short.silent,
-                .from_id = if (short.out.value != null) .none else .{ .value = .{ .PeerUser = .{ .user_id = short.user_id } } },
-                .peer_id = .{ .PeerUser = .{ .user_id = short.user_id } },
+                .from_id = from_id,
+                .peer_id = peer_id,
                 .date = short.date,
                 .message = short.message,
                 .fwd_from = short.fwd_from,
@@ -1019,34 +1006,34 @@ pub fn Client(comptime handlers: []const Handler) type {
             try self.routeUpdates(io, arena_alloc, .{ .date = short.date, .updates = &updates }, &.{}, &.{});
         }
 
+        fn dispatchShortMessage(self: *Self, io: Io, payload: []const u8) !void {
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+            const arena_alloc = arena.allocator();
+            var r: std.Io.Reader = .fixed(payload[4..]);
+            const short = try codec.decodeStructBody(types.UpdateShortMessage, &r, arena_alloc);
+            try self.routeShortMessage(
+                io,
+                arena_alloc,
+                short,
+                if (short.out.value != null) .none else .{ .value = .{ .PeerUser = .{ .user_id = short.user_id } } },
+                .{ .PeerUser = .{ .user_id = short.user_id } },
+            );
+        }
+
         fn dispatchShortChatMessage(self: *Self, io: Io, payload: []const u8) !void {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
             const arena_alloc = arena.allocator();
             var r: std.Io.Reader = .fixed(payload[4..]);
             const short = try codec.decodeStructBody(types.UpdateShortChatMessage, &r, arena_alloc);
-            const msg = types.Message{
-                .id = short.id,
-                .out = short.out,
-                .mentioned = short.mentioned,
-                .media_unread = short.media_unread,
-                .silent = short.silent,
-                .from_id = .{ .value = .{ .PeerUser = .{ .user_id = short.from_id } } },
-                .peer_id = .{ .PeerChat = .{ .chat_id = short.chat_id } },
-                .date = short.date,
-                .message = short.message,
-                .fwd_from = short.fwd_from,
-                .via_bot_id = short.via_bot_id,
-                .reply_to = short.reply_to,
-                .entities = short.entities,
-                .ttl_period = short.ttl_period,
-            };
-            const updates = [_]unions.Update{.{ .UpdateNewMessage = .{
-                .message = .{ .Message = msg },
-                .pts = short.pts,
-                .pts_count = short.pts_count,
-            } }};
-            try self.routeUpdates(io, arena_alloc, .{ .date = short.date, .updates = &updates }, &.{}, &.{});
+            try self.routeShortMessage(
+                io,
+                arena_alloc,
+                short,
+                .{ .value = .{ .PeerUser = .{ .user_id = short.from_id } } },
+                .{ .PeerChat = .{ .chat_id = short.chat_id } },
+            );
         }
     };
 }
