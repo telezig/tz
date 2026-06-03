@@ -303,11 +303,17 @@ fn markGap(self: *State, gpa: std.mem.Allocator, entry: Entry) !void {
     }
 }
 
-fn lessByPts(_: void, a: unions.Update, b: unions.Update) bool {
-    const pa = if (ptsInfo(a)) |i| i.pts - i.count else std.math.minInt(i32);
-    const pb = if (ptsInfo(b)) |i| i.pts - i.count else std.math.minInt(i32);
-    return pa < pb;
-}
+/// An update paired with its precomputed sort key (`pts - count`, or minInt for
+/// updates that carry no ordering info). Decorating up front means `ptsInfo` runs
+/// once per update instead of twice per comparison inside the sort.
+const Keyed = struct {
+    key: i32,
+    u: unions.Update,
+
+    fn lessThan(_: void, a: Keyed, b: Keyed) bool {
+        return a.key < b.key;
+    }
+};
 
 /// Process a container of socket updates: checks `seq`, sorts by pts, and applies
 /// those without gaps. On a gap, marks the corresponding entry for difference
@@ -336,12 +342,19 @@ pub fn process(
         }
     }
 
-    const sorted = try arena.dupe(unions.Update, c.updates);
-    std.sort.pdq(unions.Update, sorted, {}, lessByPts);
+    const sorted = try arena.alloc(Keyed, c.updates.len);
+    for (c.updates, sorted) |u, *slot| {
+        slot.* = .{
+            .key = if (ptsInfo(u)) |i| i.pts - i.count else std.math.minInt(i32),
+            .u = u,
+        };
+    }
+    std.sort.pdq(Keyed, sorted, {}, Keyed.lessThan);
 
     var applied: std.ArrayListUnmanaged(unions.Update) = .empty;
     var gapped = false;
-    for (sorted) |u| {
+    for (sorted) |slot| {
+        const u = slot.u;
         const tag = @tagName(u);
 
         // UpdateChannelTooLong is a "you are too far behind" signal: it must
