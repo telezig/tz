@@ -1047,14 +1047,12 @@ fn initRandomCounter(io: Io) !void {
     codec.initRandom(csprng.random().int(i64));
 }
 
-const layer: i32 = 225;
-
 fn wrapInit(allocator: Allocator, api_id: i32, query_bytes: []const u8) ![]u8 {
     const ser = @import("codec").serialize;
     var hdr: [256]u8 = undefined;
     var w: std.Io.Writer = .fixed(&hdr);
     try w.writeInt(u32, functions.InvokeWithLayer.cid, .little);
-    try w.writeInt(i32, layer, .little);
+    try w.writeInt(i32, functions.layer, .little);
     try w.writeInt(u32, functions.InitConnection.cid, .little);
     try w.writeInt(i32, 0, .little);
     try ser.int(&w, api_id);

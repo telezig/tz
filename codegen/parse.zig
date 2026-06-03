@@ -19,6 +19,8 @@ pub const Constructor = struct {
 
 pub const Schema = struct {
     constructors: std.ArrayList(Constructor),
+    /// API layer version, parsed from the trailing `// LAYER N` marker in api.tl.
+    layer: i32 = 0,
 
     pub fn init() Schema {
         return .{ .constructors = .empty };
@@ -110,6 +112,11 @@ pub fn parseFile(path: []const u8, schema: *Schema, io: std.Io, gpa: Allocator, 
     var is_function = false;
     var lines = std.mem.tokenizeScalar(u8, content, '\n');
     while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "// LAYER ")) |pos| {
+            const tail = std.mem.trim(u8, line[pos + "// LAYER ".len ..], " \t\r\n");
+            if (std.fmt.parseInt(i32, tail, 10)) |n| schema.layer = n else |_| {}
+            continue;
+        }
         if (std.mem.indexOf(u8, line, "---functions---") != null) {
             is_function = true;
             continue;

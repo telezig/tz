@@ -251,6 +251,7 @@ pub fn emitFunctions(
     }
 
     try buf.appendSlice(allocator, "const tl = @import(\"codec\");\n\n");
+    try buf.print(allocator, "/// API layer version this schema was generated from (used by invokeWithLayer).\npub const layer: i32 = {d};\n\n", .{schema.layer});
     var name_buf: [256]u8 = undefined;
     var resp_buf: [256]u8 = undefined;
     var field_buf: [256]u8 = undefined;
