@@ -227,23 +227,18 @@ const handlers = &.{
     tz.handler(tg.UpdateBotCallbackQuery, onCallback),
 };
 
-pub fn main(init: std.process.Init.Minimal) !void {
-    g_environ = init.environ;
+pub fn main(init: std.process.Init) !void {
+    g_environ = init.minimal.environ;
 
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = debug_allocator.deinit();
-    const allocator = debug_allocator.allocator();
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    const allocator = init.gpa;
+    const io = init.io;
 
     var file_storage = tz.Storage.File.init("feature_demo.session");
 
     const client = try tz.Client(handlers).init(allocator, .{
-        .api_id = try std.fmt.parseInt(i32, init.environ.getPosix("TZ_API_ID") orelse usage(), 10),
-        .api_hash = init.environ.getPosix("TZ_API_HASH") orelse usage(),
-        .bot_token = init.environ.getPosix("TZ_BOT_TOKEN") orelse usage(),
+        .api_id = try std.fmt.parseInt(i32, init.minimal.environ.getPosix("TZ_API_ID") orelse usage(), 10),
+        .api_hash = init.minimal.environ.getPosix("TZ_API_HASH") orelse usage(),
+        .bot_token = init.minimal.environ.getPosix("TZ_BOT_TOKEN") orelse usage(),
         .storage = file_storage.storage(),
     });
     defer client.deinit();
