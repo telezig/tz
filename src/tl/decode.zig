@@ -107,6 +107,12 @@ fn decodeBareElem(comptime Child: type, r: *std.Io.Reader, allocator: Allocator)
 
 fn decodeVector(comptime Child: type, r: *std.Io.Reader, allocator: Allocator) anyerror![]Child {
     const cid = try r.takeInt(u32, .little);
+    if (cid == cidGzipPacked) {
+        const data = try decompressGzip(r, allocator);
+        defer allocator.free(data);
+        var dr = std.Io.Reader.fixed(data);
+        return decodeVector(Child, &dr, allocator);
+    }
     if (cid != cidVector) return error.UnexpectedConstructor;
     const count = try r.takeInt(u32, .little);
     const slice = try allocator.alloc(Child, count);
@@ -163,4 +169,47 @@ fn decodeUnion(comptime T: type, r: *std.Io.Reader, allocator: Allocator) anyerr
         }
     }
     return error.UnknownConstructor;
+}
+
+const en = @import("wire.zig").write;
+
+test "decodeVector decodes a gzip_packed Vector result" {
+    const allocator = std.testing.allocator;
+
+    const Item = struct {
+        pub const cid: u32 = 0xaabbccdd;
+        x: i32,
+    };
+
+    // inner: Vector<Item> with two elements
+    var inbuf: [256]u8 = undefined;
+    var iw = std.Io.Writer.fixed(&inbuf);
+    try iw.writeInt(u32, cidVector, .little);
+    try iw.writeInt(u32, 2, .little);
+    try iw.writeInt(u32, Item.cid, .little);
+    try iw.writeInt(i32, 111, .little);
+    try iw.writeInt(u32, Item.cid, .little);
+    try iw.writeInt(i32, 222, .little);
+
+    // gzip-compress the inner vector
+    var cbuf: [512]u8 = undefined;
+    var cw = std.Io.Writer.fixed(&cbuf);
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var comp = try std.compress.flate.Compress.init(&cw, &window, .gzip, .default);
+    try comp.writer.writeAll(iw.buffered());
+    try comp.finish();
+
+    // wrap: gzip_packed#3072cfa1 packed_data:bytes
+    var obuf: [640]u8 = undefined;
+    var ow = std.Io.Writer.fixed(&obuf);
+    try ow.writeInt(u32, cidGzipPacked, .little);
+    try en.bytes(&ow, cw.buffered());
+
+    var r = std.Io.Reader.fixed(ow.buffered());
+    const result = try decode([]Item, &r, allocator);
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqual(@as(i32, 111), result[0].x);
+    try std.testing.expectEqual(@as(i32, 222), result[1].x);
 }
