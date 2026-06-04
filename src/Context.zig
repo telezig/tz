@@ -22,6 +22,8 @@ callFileFn: *const fn (client: *anyopaque, io: Io, bytes: []const u8) anyerror![
 /// Routes to a CDN DC sub-connection (no account auth required).
 callCdnFn: *const fn (client: *anyopaque, io: Io, dc_id: i32, bytes: []const u8) anyerror![]u8,
 loginQrFn: *const fn (client: *anyopaque, io: Io, on_token: *const fn (url: []const u8) anyerror!void) anyerror!void,
+/// Parallelism for file download/upload. See ClientOptions.file_workers.
+file_workers: usize = 4,
 
 /// Encode `request`, send it through `callFn`, and return the owned raw response
 /// bytes. Caller frees with `self.allocator.free`.

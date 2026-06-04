@@ -67,6 +67,10 @@ pub const ClientOptions = struct {
     /// — FLOOD_WAIT waits the server-requested seconds — so this bounds the attempt
     /// count, not wall-clock time.
     max_rpc_retries: u32 = 5,
+    /// Number of parallel part requests for file download/upload. Each worker
+    /// issues `upload.GetFile`/`SaveFilePart` concurrently, multiplexed over the
+    /// same connection (responses matched by msg_id). 1 disables parallelism.
+    file_workers: usize = 4,
 };
 
 const CdnConn = struct {
@@ -438,6 +442,7 @@ pub fn Client(comptime handlers: []const Handler) type {
                         .callFileFn = callFileImpl,
                         .callCdnFn = callCdnImpl,
                         .loginQrFn = loginQrImpl,
+                        .file_workers = self.opts.file_workers,
                     });
                     self.user_authorized = true;
                     self.markHomeDc(io);
@@ -871,6 +876,7 @@ pub fn Client(comptime handlers: []const Handler) type {
                 .callFileFn = callFileImpl,
                 .callCdnFn = callCdnImpl,
                 .loginQrFn = loginQrImpl,
+                .file_workers = self.opts.file_workers,
             };
 
             for (updates) |u| {

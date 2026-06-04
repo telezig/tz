@@ -14,12 +14,21 @@ pub const File = @import("File.zig");
 pub const upload = File.upload;
 pub const documentLocation = File.documentLocation;
 pub const photoLocation = File.photoLocation;
+pub const documentSize = File.documentSize;
 
 /// Download an entire file into a heap-allocated buffer. caller frees with ctx.allocator.
 pub fn download(ctx: Context, location: unions.InputFileLocation) ![]u8 {
     var f = File.init(ctx, location);
     defer f.deinit();
     return f.readAll(ctx.allocator);
+}
+
+/// Like download, but fetches parts in parallel when the total `size` is known
+/// (e.g. from `documentSize`). caller frees with ctx.allocator.
+pub fn downloadSized(ctx: Context, location: unions.InputFileLocation, size: usize) ![]u8 {
+    var f = File.init(ctx, location);
+    defer f.deinit();
+    return f.downloadAll(ctx.allocator, size);
 }
 
 pub const PinOptions = struct {
