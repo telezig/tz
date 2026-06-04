@@ -8,7 +8,7 @@ echo bot: ~700kb statically linked (`ReleaseSmall`).
 - tl codegen from schema at build time
 - comptime handler dispatch — zero-overhead update routing
 - bot and user auth
-- file upload / download — streaming, CDN-transparent
+- file upload / download — streaming or parallel, CDN-transparent
 - session persistence, reliable updates — pts/qts gap detection, `getDifference` recovery across restarts
 - peer cache with username resolution
 
@@ -89,7 +89,7 @@ try ft.bold("hello"); try ft.plain(" world");
 try msg.replyFmt(ft.text.items, ft.entities.items);
 ```
 
-file download — streaming or all-at-once:
+file download — streaming, all-at-once, or parallel:
 
 ```zig
 // streaming
@@ -100,7 +100,14 @@ while (try file.next()) |chunk| { ... }
 // all at once
 const bytes = try h.download(msg.ctx, msg.mediaLocation().?);
 defer msg.ctx.allocator.free(bytes);
+
+// parallel — needs the known size (e.g. tz.File.documentSize(doc)). parts are
+// multiplexed over one connection; falls back to sequential when size is 0.
+const sized = try h.downloadSized(msg.ctx, location, size);
+defer msg.ctx.allocator.free(sized);
 ```
+
+`file_workers` (default 4) in `Client.init` sets the parallelism; `upload` parallelizes the same way.
 
 other update types — any `UpdateXxx` from the TL schema:
 
@@ -131,6 +138,16 @@ username resolution (cache-first, falls back to RPC):
 const peer = try msg.ctx.resolveUsername("username");
 ```
 
+one-time setup after auth (bots and users alike), before the update loop, via `on_ready`:
+
+```zig
+const client = try tz.Client(handlers).init(allocator, .{
+    .api_id = api_id, .api_hash = api_hash, .bot_token = bot_token,
+    .storage = storage.storage(),
+    .on_ready = onReady, // fn(ctx) !void — e.g. bots.SetBotCommands
+});
+```
+
 ## memory
 
 whatever you hand to `Client.init` owns everything.
@@ -152,4 +169,4 @@ for (urls, 0..) |url, i| {
 try msg.ctx.exec(f.messages.SendMultiMedia{ .multi_media = &multi });
 ```
 
-see [examples/](examples/).
+see [examples/](examples/), or [pill](https://github.com/telezig/pill) — a full bot covering most of the api.
