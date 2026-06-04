@@ -594,7 +594,12 @@ pub fn Client(comptime handlers: []const Handler) type {
 
         fn fetchCommonDiff(self: *Self, io: Io, gd: functions.updates.GetDifference) !void {
             ulog.info("GetDifference pts={} qts={} date={}", .{ gd.pts, gd.qts, gd.date });
-            const diff_resp = try self.call(io, gd);
+            const diff_resp = self.call(io, gd) catch |err| switch (err) {
+                // Dead pts/qts: getDifference can never catch up, so re-seed from
+                // GetState and clear the gap instead of retrying forever.
+                error.PersistentTimestampInvalid => return self.resetCommonState(io),
+                else => return err,
+            };
             defer diff_resp.deinit();
             const diff = diff_resp.value;
             var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -611,6 +616,22 @@ pub fn Client(comptime handlers: []const Handler) type {
                 self.state.pts, applied.updates.len, applied.has_more,
             });
             try self.dispatchUpdateSlice(io, arena.allocator(), applied.updates, applied.users, applied.chats);
+        }
+
+        /// Recover from PERSISTENT_TIMESTAMP_INVALID/EMPTY: the stored pts/qts is
+        /// unrecoverable (stale session, token/account change, or too long offline),
+        /// so re-seed common state from updates.GetState and clear the gap. Mirrors
+        /// the first-time seeding in initUpdateState.
+        fn resetCommonState(self: *Self, io: Io) !void {
+            ulog.warn("persistent timestamp invalid, resyncing common state via GetState", .{});
+            const st_resp = try self.call(io, functions.updates.GetState{});
+            defer st_resp.deinit();
+            const st = st_resp.value;
+            self.mb_mutex.lockUncancelable(io);
+            defer self.mb_mutex.unlock(io);
+            self.state.setState(st);
+            self.state.getting_diff = false;
+            ulog.info("GetState resync -> pts={} qts={} date={} seq={}", .{ st.pts, st.qts, st.date, st.seq });
         }
 
         fn fetchChannelDiff(self: *Self, io: Io, id: i64, base: functions.updates.GetChannelDifference) !void {
@@ -838,6 +859,10 @@ pub fn Client(comptime handlers: []const Handler) type {
             // Channel we can't access: permanent, so the diff loop must drop it
             // rather than retry forever.
             if (e.isChannelInvalid()) return error.ChannelInvalid;
+            // Persisted pts/qts is unrecoverable (stale session, token/account change,
+            // or too long offline). getDifference can't recover; resync via getState.
+            if (e.is("PERSISTENT_TIMESTAMP_INVALID") or e.is("PERSISTENT_TIMESTAMP_EMPTY"))
+                return error.PersistentTimestampInvalid;
             return error.RpcError;
         }
 
