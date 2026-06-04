@@ -67,6 +67,11 @@ pub const ClientOptions = struct {
     /// — FLOOD_WAIT waits the server-requested seconds — so this bounds the attempt
     /// count, not wall-clock time.
     max_rpc_retries: u32 = 5,
+    /// Called once after the connection is authenticated, before the update loop
+    /// starts — for both bots and user sessions. Use for one-time setup such as
+    /// registering the command menu (`bots.SetBotCommands`). Receives a `Context`,
+    /// same as update handlers. Not re-run across reconnects/DC migrations.
+    on_ready: ?*const fn (Context) anyerror!void = null,
     /// Number of parallel part requests for file download/upload. Each worker
     /// issues `upload.GetFile`/`SaveFilePart` concurrently, multiplexed over the
     /// same connection (responses matched by msg_id). 1 disables parallelism.
@@ -90,6 +95,7 @@ pub fn Client(comptime handlers: []const Handler) type {
         dc_resolved: bool = false,
         bot_id: ?i64 = null,
         user_authorized: bool = false,
+        ready_called: bool = false,
         dc_list: ?[]Connector.DC = null,
         sub_conns: std.AutoHashMapUnmanaged(u8, *Connector) = .empty,
         sub_conns_mu: std.Io.Mutex = std.Io.Mutex.init,
@@ -176,6 +182,27 @@ pub fn Client(comptime handlers: []const Handler) type {
             const bytes = try codec.encodeAlloc(request, self.allocator);
             defer self.allocator.free(bytes);
             self.allocator.free(try callImpl(self, io, bytes));
+        }
+
+        /// Build the `Context` handed to auth_fn, on_ready, and update handlers.
+        /// `entities` carries the users/chats from the current update batch (empty
+        /// for the setup hooks).
+        fn makeContext(self: *Self, io: Io, entities: Entities) Context {
+            return .{
+                .client = self,
+                .io = io,
+                .allocator = self.allocator,
+                .api_id = self.opts.api_id,
+                .api_hash = self.opts.api_hash,
+                .entities = entities,
+                .peer_cache = &self.state.peers,
+                .mb_mutex = &self.mb_mutex,
+                .callFn = callImpl,
+                .callFileFn = callFileImpl,
+                .callCdnFn = callCdnImpl,
+                .loginQrFn = loginQrImpl,
+                .file_workers = self.opts.file_workers,
+            };
         }
 
         /// Retry engine behind `Context.call`/`exec` (handler/auth path). Returns the
@@ -429,25 +456,19 @@ pub fn Client(comptime handlers: []const Handler) type {
                 }
             } else if (self.opts.auth_fn) |f| {
                 if (!self.user_authorized) {
-                    try f(Context{
-                        .client = self,
-                        .io = io,
-                        .allocator = self.allocator,
-                        .api_id = self.opts.api_id,
-                        .api_hash = self.opts.api_hash,
-                        .entities = .{},
-                        .peer_cache = &self.state.peers,
-                        .mb_mutex = &self.mb_mutex,
-                        .callFn = callImpl,
-                        .callFileFn = callFileImpl,
-                        .callCdnFn = callCdnImpl,
-                        .loginQrFn = loginQrImpl,
-                        .file_workers = self.opts.file_workers,
-                    });
+                    try f(self.makeContext(io, .{}));
                     self.user_authorized = true;
                     self.markHomeDc(io);
                 }
             }
+
+            // One-time post-auth setup, before the update loop. Runs for both bots
+            // and user sessions; guarded so reconnects/migrations don't re-run it.
+            if (!self.ready_called) {
+                if (self.opts.on_ready) |f| try f(self.makeContext(io, .{}));
+                self.ready_called = true;
+            }
+
             self.initUpdateState(io) catch |err|
                 std.log.warn("failed to init update state: {}", .{err});
             self.fetchDcList(io) catch |err|
@@ -863,21 +884,7 @@ pub fn Client(comptime handlers: []const Handler) type {
                 else => {},
             };
 
-            const ctx = Context{
-                .client = self,
-                .io = io,
-                .allocator = self.allocator,
-                .api_id = self.opts.api_id,
-                .api_hash = self.opts.api_hash,
-                .entities = entities,
-                .peer_cache = &self.state.peers,
-                .mb_mutex = &self.mb_mutex,
-                .callFn = callImpl,
-                .callFileFn = callFileImpl,
-                .callCdnFn = callCdnImpl,
-                .loginQrFn = loginQrImpl,
-                .file_workers = self.opts.file_workers,
-            };
+            const ctx = self.makeContext(io, entities);
 
             for (updates) |u| {
                 const update_cid: u32 = switch (u) {
