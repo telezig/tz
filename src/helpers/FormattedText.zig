@@ -86,6 +86,53 @@ pub fn spoiler(self: *FormattedText, s: []const u8) !void {
     try self.entities.append(self.allocator, .{ .MessageEntitySpoiler = .{ .offset = off, .length = utf16Len(s) } });
 }
 
+pub fn customEmoji(self: *FormattedText, s: []const u8, document_id: i64) !void {
+    const off = self.offset();
+    try self.text.appendSlice(self.allocator, s);
+    try self.entities.append(self.allocator, .{ .MessageEntityCustomEmoji = .{ .offset = off, .length = utf16Len(s), .document_id = document_id } });
+}
+
+pub fn mentionName(self: *FormattedText, s: []const u8, user_id: i64) !void {
+    const off = self.offset();
+    try self.text.appendSlice(self.allocator, s);
+    try self.entities.append(self.allocator, .{ .MessageEntityMentionName = .{ .offset = off, .length = utf16Len(s), .user_id = user_id } });
+}
+
+pub fn blockquote(self: *FormattedText, s: []const u8, collapsed: bool) !void {
+    const off = self.offset();
+    try self.text.appendSlice(self.allocator, s);
+    try self.entities.append(self.allocator, .{ .MessageEntityBlockquote = .{
+        .offset = off,
+        .length = utf16Len(s),
+        .collapsed = if (collapsed) .some({}) else .none,
+    } });
+}
+
+pub const DateOptions = struct {
+    relative: bool = false,
+    short_time: bool = false,
+    long_time: bool = false,
+    short_date: bool = false,
+    long_date: bool = false,
+    day_of_week: bool = false,
+};
+
+pub fn formattedDate(self: *FormattedText, s: []const u8, date: i32, opts: DateOptions) !void {
+    const off = self.offset();
+    try self.text.appendSlice(self.allocator, s);
+    try self.entities.append(self.allocator, .{ .MessageEntityFormattedDate = .{
+        .offset = off,
+        .length = utf16Len(s),
+        .date = date,
+        .relative = if (opts.relative) .some({}) else .none,
+        .short_time = if (opts.short_time) .some({}) else .none,
+        .long_time = if (opts.long_time) .some({}) else .none,
+        .short_date = if (opts.short_date) .some({}) else .none,
+        .long_date = if (opts.long_date) .some({}) else .none,
+        .day_of_week = if (opts.day_of_week) .some({}) else .none,
+    } });
+}
+
 test "utf16Len" {
     try std.testing.expectEqual(@as(i32, 0), utf16Len(""));
     try std.testing.expectEqual(@as(i32, 5), utf16Len("hello"));
