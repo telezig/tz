@@ -516,7 +516,19 @@ pub fn Client(comptime handlers: []const Handler) type {
         }
 
         fn initUpdateState(self: *Self, io: Io) !void {
-            if (self.state_initialized) return;
+            if (self.state_initialized) {
+                // On reconnect, proactively queue diffs so messages missed while the
+                // connection was dead are delivered without waiting for a live update
+                // to trigger gap detection.
+                self.mb_mutex.lockUncancelable(io);
+                defer self.mb_mutex.unlock(io);
+                if (self.state.pts != 0) self.state.getting_diff = true;
+                var it = self.state.channels.keyIterator();
+                while (it.next()) |k| {
+                    try self.state.getting_channel_diff.put(self.allocator, k.*, {});
+                }
+                return;
+            }
             if (try self.opts.storage.loadUpdateState(io, self.allocator)) |blob| {
                 defer self.allocator.free(blob);
                 var r: std.Io.Reader = .fixed(blob);
