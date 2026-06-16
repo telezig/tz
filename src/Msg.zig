@@ -135,3 +135,25 @@ pub fn replyFmt(self: Msg, txt: []const u8, entities: []unions.MessageEntity) !v
         .reply_to = .some(.{ .InputReplyToMessage = .{ .reply_to_msg_id = self.raw.id } }),
     });
 }
+
+/// Send a rich message (layer 227+) to the same peer. Use InputRichMessage variants:
+/// .InputRichMessage (blocks), .InputRichMessageHTML, or .InputRichMessageMarkdown.
+pub fn respondRich(self: Msg, rich: unions.InputRichMessage) !void {
+    const p = self.peer() orelse return;
+    try self.ctx.exec(functions.messages.SendMessage{
+        .peer = p,
+        .message = "",
+        .rich_message = .some(rich),
+    });
+}
+
+/// Reply with a rich message (layer 227+) that references this message.
+pub fn replyRich(self: Msg, rich: unions.InputRichMessage) !void {
+    const p = self.peer() orelse return;
+    try self.ctx.exec(functions.messages.SendMessage{
+        .peer = p,
+        .message = "",
+        .rich_message = .some(rich),
+        .reply_to = .some(.{ .InputReplyToMessage = .{ .reply_to_msg_id = self.raw.id } }),
+    });
+}

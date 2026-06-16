@@ -40,6 +40,8 @@ pub const PinOptions = struct {
 pub const EditOptions = struct {
     text: ?[]const u8 = null,
     reply_markup: ?unions.ReplyMarkup = null,
+    schedule_repeat_period: ?i32 = null,
+    rich_message: ?unions.InputRichMessage = null,
 };
 
 pub const CallbackAnswerOptions = struct {
@@ -87,6 +89,8 @@ pub fn editMessage(ctx: Context, peer: unions.InputPeer, msg_id: i32, opts: Edit
         .id = msg_id,
         .message = if (opts.text) |t| .some(t) else .none,
         .reply_markup = if (opts.reply_markup) |m| .some(m) else .none,
+        .schedule_repeat_period = if (opts.schedule_repeat_period) |p| .some(p) else .none,
+        .rich_message = if (opts.rich_message) |r| .some(r) else .none,
     });
 }
 
@@ -212,6 +216,28 @@ pub fn getChannels(ctx: Context, ids: []const unions.InputChannel) !Context.Resp
         .MessagesChatsSlice => |r| r.chats,
     };
     return .{ .arena = resp.arena, .value = chats };
+}
+
+/// Join a channel. Returns the Updates from the server, or error.WebViewRequired if the
+/// channel uses a bot gate that returns a web-view flow (layer 227+).
+pub fn joinChannel(ctx: Context, channel: unions.InputChannel) !Context.Response(unions.Updates) {
+    const resp = try ctx.call(functions.channels.JoinChannel{ .channel = channel });
+    errdefer resp.deinit();
+    return switch (resp.value) {
+        .MessagesChatInviteJoinResultOk => |r| .{ .arena = resp.arena, .value = r.updates },
+        .MessagesChatInviteJoinResultWebView => error.WebViewRequired,
+    };
+}
+
+/// Accept a chat invite link. Returns the Updates from the server, or error.WebViewRequired
+/// if the invite triggers a bot gate web-view flow (layer 227+).
+pub fn importChatInvite(ctx: Context, hash: []const u8) !Context.Response(unions.Updates) {
+    const resp = try ctx.call(functions.messages.ImportChatInvite{ .hash = hash });
+    errdefer resp.deinit();
+    return switch (resp.value) {
+        .MessagesChatInviteJoinResultOk => |r| .{ .arena = resp.arena, .value = r.updates },
+        .MessagesChatInviteJoinResultWebView => error.WebViewRequired,
+    };
 }
 
 /// Resolve the peer from a callback query's peer field using the update's entity cache.
