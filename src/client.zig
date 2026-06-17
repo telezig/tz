@@ -107,6 +107,17 @@ pub fn Client(comptime handlers: []const Handler) type {
         state_initialized: bool = false,
         sync_event: std.Io.Event = .unset,
         sync_stop: bool = false,
+        /// Monotonic count of updates pushed by the server (bumped in handleUpdate).
+        /// syncLoop watches it to detect a silently-stalled push stream. It's a relaxed
+        /// advisory signal, so it's accessed with monotonic atomics, not the mutex.
+        update_tick: u64 = 0,
+
+        /// syncLoop's wait quantum, and the idle window after which it forces a
+        /// getDifference if the server has pushed nothing. Counted in wakes so
+        /// syncLoop needs no clock reads.
+        const sync_wake_interval_s: u64 = 60;
+        const update_idle_timeout_s: u64 = 15 * 60;
+        const update_idle_wakes: u32 = @intCast(update_idle_timeout_s / sync_wake_interval_s);
 
         pub fn init(allocator: Allocator, opts: ClientOptions) !*Self {
             const c = try allocator.create(Self);
@@ -517,15 +528,34 @@ pub fn Client(comptime handlers: []const Handler) type {
 
         fn initUpdateState(self: *Self, io: Io) !void {
             if (self.state_initialized) {
-                // On reconnect, proactively queue diffs so messages missed while the
-                // connection was dead are delivered without waiting for a live update
-                // to trigger gap detection.
-                self.mb_mutex.lockUncancelable(io);
-                defer self.mb_mutex.unlock(io);
-                if (self.state.pts != 0) self.state.getting_diff = true;
-                var it = self.state.channels.keyIterator();
-                while (it.next()) |k| {
-                    try self.state.getting_channel_diff.put(self.allocator, k.*, {});
+                // On reconnect, treat the dead connection as a gap: queue a common
+                // getDifference (and per-channel diffs) so messages missed while the
+                // connection was down get delivered and the server resumes pushing
+                // live updates on the new session.
+                const need_seed = blk: {
+                    self.mb_mutex.lockUncancelable(io);
+                    defer self.mb_mutex.unlock(io);
+                    var it = self.state.channels.keyIterator();
+                    while (it.next()) |k| {
+                        try self.state.getting_channel_diff.put(self.allocator, k.*, {});
+                    }
+                    if (self.state.pts != 0) {
+                        self.state.getting_diff = true;
+                        break :blk false;
+                    }
+                    break :blk true;
+                };
+                // No baseline pts (getDifference needs one): seed from GetState so the
+                // new session is registered for updates and future pushes have a
+                // reference point. Nothing to catch up on in this case.
+                if (need_seed) {
+                    const st_resp = try self.call(io, functions.updates.GetState{});
+                    defer st_resp.deinit();
+                    const st = st_resp.value;
+                    self.mb_mutex.lockUncancelable(io);
+                    self.state.setState(st);
+                    self.mb_mutex.unlock(io);
+                    ulog.info("reconnect GetState -> pts={} qts={} date={} seq={}", .{ st.pts, st.qts, st.date, st.seq });
                 }
                 return;
             }
@@ -570,19 +600,46 @@ pub fn Client(comptime handlers: []const Handler) type {
         }
 
         fn syncLoop(self: *Self, io: Io) void {
+            var last_tick = @atomicLoad(u64, &self.update_tick, .monotonic);
+            var idle_wakes: u32 = 0;
             while (true) {
                 self.sync_event.waitTimeout(io, .{ .duration = .{
-                    .raw = std.Io.Duration.fromSeconds(60),
+                    .raw = std.Io.Duration.fromSeconds(sync_wake_interval_s),
                     .clock = .awake,
                 } }) catch |err| ulog.debug("syncLoop waitTimeout: {}", .{err});
                 self.sync_event.reset();
                 if (self.closed or self.sync_stop) return;
+
+                // Safety net: if the server has pushed nothing across a full idle
+                // window, force a common getDifference to recover a silently-stalled
+                // push stream (e.g. after a reconnect).
+                const tick = @atomicLoad(u64, &self.update_tick, .monotonic);
+                if (tick != last_tick) {
+                    last_tick = tick;
+                    idle_wakes = 0;
+                } else if (idle_wakes + 1 >= update_idle_wakes) {
+                    idle_wakes = 0;
+                    self.forceCommonDiff(io);
+                } else {
+                    idle_wakes += 1;
+                }
+
                 ulog.debug("syncLoop wake: getting_diff={} channel_gaps={}", .{
                     self.state.getting_diff, self.state.getting_channel_diff.count(),
                 });
                 self.drainDifferences(io) catch |err|
                     ulog.warn("drainDifferences: {}", .{err});
             }
+        }
+
+        /// Mark the common update stream as needing a getDifference, unless one is
+        /// already pending or there's no baseline pts to diff from.
+        fn forceCommonDiff(self: *Self, io: Io) void {
+            self.mb_mutex.lockUncancelable(io);
+            defer self.mb_mutex.unlock(io);
+            if (self.state.getting_diff or self.state.pts == 0) return;
+            ulog.debug("no pushed updates for ~{}s, forcing getDifference", .{update_idle_timeout_s});
+            self.state.getting_diff = true;
         }
 
         fn drainDifferences(self: *Self, io: Io) !void {
@@ -880,6 +937,7 @@ pub fn Client(comptime handlers: []const Handler) type {
 
         fn handleUpdate(ptr: *anyopaque, io: Io, payload: []const u8) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
+            _ = @atomicRmw(u64, &self.update_tick, .Add, 1, .monotonic);
             if (payload.len < 4) return;
             const cid = std.mem.readInt(u32, payload[0..4], .little);
             switch (cid) {
