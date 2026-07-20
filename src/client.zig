@@ -110,7 +110,9 @@ pub fn Client(comptime handlers: []const Handler) type {
         /// Monotonic count of updates pushed by the server (bumped in handleUpdate).
         /// syncLoop watches it to detect a silently-stalled push stream. It's a relaxed
         /// advisory signal, so it's accessed with monotonic atomics, not the mutex.
-        update_tick: u64 = 0,
+        /// u32 (not u64) so the atomic ops lower to a native instruction on 32-bit
+        /// targets (e.g. armv7); wraparound is harmless since only inequality is checked.
+        update_tick: u32 = 0,
 
         /// syncLoop's wait quantum, and the idle window after which it forces a
         /// getDifference if the server has pushed nothing. Counted in wakes so
@@ -600,7 +602,7 @@ pub fn Client(comptime handlers: []const Handler) type {
         }
 
         fn syncLoop(self: *Self, io: Io) void {
-            var last_tick = @atomicLoad(u64, &self.update_tick, .monotonic);
+            var last_tick = @atomicLoad(u32, &self.update_tick, .monotonic);
             var idle_wakes: u32 = 0;
             while (true) {
                 self.sync_event.waitTimeout(io, .{ .duration = .{
@@ -613,7 +615,7 @@ pub fn Client(comptime handlers: []const Handler) type {
                 // Safety net: if the server has pushed nothing across a full idle
                 // window, force a common getDifference to recover a silently-stalled
                 // push stream (e.g. after a reconnect).
-                const tick = @atomicLoad(u64, &self.update_tick, .monotonic);
+                const tick = @atomicLoad(u32, &self.update_tick, .monotonic);
                 if (tick != last_tick) {
                     last_tick = tick;
                     idle_wakes = 0;
@@ -937,7 +939,7 @@ pub fn Client(comptime handlers: []const Handler) type {
 
         fn handleUpdate(ptr: *anyopaque, io: Io, payload: []const u8) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
-            _ = @atomicRmw(u64, &self.update_tick, .Add, 1, .monotonic);
+            _ = @atomicRmw(u32, &self.update_tick, .Add, 1, .monotonic);
             if (payload.len < 4) return;
             const cid = std.mem.readInt(u32, payload[0..4], .little);
             switch (cid) {

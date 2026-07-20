@@ -183,7 +183,7 @@ fn powMod(allocator: Allocator, result: *Managed, base: *const Managed, exp: *co
     const nbits = exp.bitCountAbs();
     for (0..nbits) |i| {
         const limb_idx = i / limb_bits;
-        const bit_shift: u6 = @intCast(i % limb_bits);
+        const bit_shift: std.math.Log2Int(Limb) = @intCast(i % limb_bits);
         const bit: u1 = @truncate(exp.limbs[limb_idx] >> bit_shift);
 
         if (bit != 0) {

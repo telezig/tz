@@ -9,14 +9,28 @@ const cidVector: u32 = 0x1cb5c415;
 const cidBoolTrue: u32 = 0x997275b5;
 const cidBoolFalse: u32 = 0xbc799737;
 
-var random_id_counter = std.atomic.Value(i64).init(0);
+// A spinlock-guarded i64 rather than std.atomic.Value(i64): 64-bit atomic
+// ops don't lower to a native instruction on 32-bit targets (e.g. armv7).
+// std.atomic.Mutex only needs an 8-bit cmpxchg, which is universally native,
+// and the critical section here is a single add, so spinning is fine.
+var random_id_mu: std.atomic.Mutex = .unlocked;
+var random_id_counter: i64 = 0;
+
+fn lockRandomId() void {
+    while (!random_id_mu.tryLock()) {}
+}
 
 pub fn initRandom(seed: i64) void {
-    random_id_counter.store(seed, .monotonic);
+    lockRandomId();
+    defer random_id_mu.unlock();
+    random_id_counter = seed;
 }
 
 pub fn nextRandomId() i64 {
-    return random_id_counter.fetchAdd(1, .monotonic);
+    lockRandomId();
+    defer random_id_mu.unlock();
+    defer random_id_counter +%= 1;
+    return random_id_counter;
 }
 
 pub fn encodeAlloc(value: anytype, allocator: Allocator) ![]u8 {
