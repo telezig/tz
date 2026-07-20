@@ -806,7 +806,7 @@ pub fn applyChannelDifference(
             // this slice was not final), matching grammers.
             const dl_pts: ?i32 = switch (d.dialog) {
                 .Dialog => |dl| flagValue(i32, dl.pts),
-                .DialogFolder => null,
+                .DialogFolder, .DialogCommunity => null,
             };
             if (dl_pts) |p| try self.setChannelPts(gpa, channel_id, p);
             const final = d.final.value != null;
