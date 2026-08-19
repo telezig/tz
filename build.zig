@@ -109,4 +109,82 @@ pub fn build(b: *std.Build) void {
     }) |pair| {
         update_schema.dependOn(&b.addSystemCommand(&.{ "curl", "-fsSL", pair[0], "-o", pair[1] }).step);
     }
+
+    // --- WebAssembly Target ---
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+
+    const wasm_codec_module = b.createModule(.{
+        .root_source_file = b.path("src/tl/codec.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+    });
+
+    const wasm_types_module = b.createModule(.{
+        .root_source_file = gen_dir.path(b, "types.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "codec", .module = wasm_codec_module }},
+    });
+    const wasm_unions_module = b.createModule(.{
+        .root_source_file = gen_dir.path(b, "unions.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "types", .module = wasm_types_module }},
+    });
+    wasm_types_module.addImport("unions", wasm_unions_module);
+
+    const wasm_functions_module = b.createModule(.{
+        .root_source_file = gen_dir.path(b, "functions.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "codec", .module = wasm_codec_module },
+            .{ .name = "types", .module = wasm_types_module },
+            .{ .name = "unions", .module = wasm_unions_module },
+        },
+    });
+
+    const wasm_tz_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "codec", .module = wasm_codec_module },
+            .{ .name = "types", .module = wasm_types_module },
+            .{ .name = "unions", .module = wasm_unions_module },
+            .{ .name = "functions", .module = wasm_functions_module },
+        },
+    });
+
+    const wasm_exe = b.addExecutable(.{
+        .name = "tz",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wasm.zig"),
+            .target = wasm_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "tz", .module = wasm_tz_mod },
+                .{ .name = "codec", .module = wasm_codec_module },
+                .{ .name = "types", .module = wasm_types_module },
+                .{ .name = "unions", .module = wasm_unions_module },
+                .{ .name = "functions", .module = wasm_functions_module },
+            },
+        }),
+    });
+    wasm_exe.entry = .disabled;
+    wasm_exe.rdynamic = true;
+
+    const wasm_install = b.addInstallArtifact(wasm_exe, .{
+        .dest_dir = .{ .override = .{ .custom = "web" } },
+    });
+    const install_web_html = b.addInstallFileWithDir(b.path("web/index.html"), .{ .custom = "web" }, "index.html");
+    const install_web_js = b.addInstallFileWithDir(b.path("web/tz-ws.js"), .{ .custom = "web" }, "tz-ws.js");
+
+    const wasm_step = b.step("wasm", "Build WebAssembly binary and demo (zig-out/web/)");
+    wasm_step.dependOn(&wasm_install.step);
+    wasm_step.dependOn(&install_web_html.step);
+    wasm_step.dependOn(&install_web_js.step);
 }

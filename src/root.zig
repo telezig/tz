@@ -26,6 +26,7 @@ pub const State = @import("State.zig");
 pub const PeerCache = State.PeerCache;
 
 pub const crypto = @import("crypto.zig");
+pub const ws = @import("ws/Transport.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -37,4 +38,5 @@ test {
     _ = @import("mtproto/Session.zig");
     _ = @import("State.zig");
     _ = @import("RpcError.zig");
+    _ = @import("ws/Transport.zig");
 }

@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>tz — WebAssembly Telegram MTProto Client</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --accent: #38bdf8;
+      --accent-hover: #0ea5e9;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --border: #334155;
+      --success: #4ade80;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background-color: var(--bg); color: var(--text); padding: 2rem; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+    .container { width: 100%; max-width: 800px; }
+    header { margin-bottom: 2rem; text-align: center; }
+    h1 { font-size: 2.2rem; font-weight: 800; color: var(--accent); margin-bottom: 0.5rem; }
+    .subtitle { color: var(--text-muted); font-size: 1rem; }
+    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.2); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+    label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.4rem; color: var(--text-muted); }
+    input, select { width: 100%; background: #0f172a; border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.8rem; color: var(--text); font-size: 0.95rem; }
+    input:focus, select:focus { outline: none; border-color: var(--accent); }
+    button { background: var(--accent); color: #0f172a; border: none; border-radius: 6px; padding: 0.75rem 1.5rem; font-size: 1rem; font-weight: 700; cursor: pointer; transition: background 0.2s; width: 100%; }
+    button:hover { background: var(--accent-hover); }
+    .status-badge { display: inline-flex; align-items: center; gap: 0.5rem; background: #0f172a; border: 1px solid var(--border); padding: 0.4rem 0.8rem; border-radius: 9999px; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #eab308; }
+    .status-dot.active { background: var(--success); }
+    .qr-container { display: flex; flex-direction: column; align-items: center; gap: 1rem; margin: 1.5rem 0; }
+    #qr-canvas { background: white; padding: 12px; border-radius: 8px; display: none; }
+    .qr-url { font-family: monospace; font-size: 0.8rem; word-break: break-all; background: #0f172a; padding: 0.8rem; border-radius: 6px; border: 1px solid var(--border); max-width: 100%; }
+    .log-panel { background: #090d16; border: 1px solid var(--border); border-radius: 8px; padding: 1rem; height: 220px; overflow-y: auto; font-family: monospace; font-size: 0.82rem; color: #cbd5e1; }
+    .log-entry { margin-bottom: 0.3rem; line-height: 1.4; }
+    .badge { font-size: 0.75rem; background: rgba(56,189,248,0.15); color: var(--accent); padding: 2px 8px; border-radius: 4px; font-weight: 600; margin-left: 0.5rem; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>tz WebAssembly <span class="badge">~88KB WASM</span></h1>
+      <p class="subtitle">Zero-dependency Telegram MTProto 2.0 Client in Pure Zig running on WebAssembly</p>
+    </header>
+
+    <div class="card">
+      <div class="status-badge">
+        <span id="status-dot" class="status-dot"></span>
+        <span id="status-text">Initializing WASM...</span>
+      </div>
+
+      <div class="grid">
+        <div>
+          <label for="api-id">API ID</label>
+          <input id="api-id" type="number" placeholder="e.g. 611335" value="611335" />
+        </div>
+        <div>
+          <label for="api-hash">API Hash</label>
+          <input id="api-hash" type="text" placeholder="e.g. d524b414d21f4d37f08684c1df41ac9c" value="d524b414d21f4d37f08684c1df41ac9c" />
+        </div>
+      </div>
+
+      <div class="grid" style="margin-bottom: 1.2rem;">
+        <div>
+          <label for="dc-select">Telegram Datacenter (WebSocket Endpoint)</label>
+          <select id="dc-select">
+            <option value="wss://venus.web.telegram.org/apiws">DC2 (Production) — wss://venus.web.telegram.org/apiws</option>
+            <option value="wss://venus.web.telegram.org/apiws_test">DC2 (Test Server) — wss://venus.web.telegram.org/apiws_test</option>
+            <option value="wss://pluto.web.telegram.org/apiws">DC1 (Production) — wss://pluto.web.telegram.org/apiws</option>
+            <option value="wss://aurora.web.telegram.org/apiws">DC3 (Production) — wss://aurora.web.telegram.org/apiws</option>
+            <option value="wss://vesta.web.telegram.org/apiws">DC4 (Production) — wss://vesta.web.telegram.org/apiws</option>
+            <option value="wss://flora.web.telegram.org/apiws">DC5 (Production) — wss://flora.web.telegram.org/apiws</option>
+          </select>
+        </div>
+        <div>
+          <label for="transport-select">Transport Protocol Framing</label>
+          <select id="transport-select">
+            <option value="0" selected>1. Obfuscated2 (AES-256-CTR) + Intermediate [Official Web Standard]</option>
+            <option value="1">2. Obfuscated2 (AES-256-CTR) + Padded Intermediate (0xdddddddd)</option>
+            <option value="2">3. Obfuscated2 (AES-256-CTR) + Abridged (0xef)</option>
+            <option value="3">4. Plain Intermediate (Unobfuscated)</option>
+            <option value="4">5. Plain Abridged (Unobfuscated)</option>
+          </select>
+        </div>
+      </div>
+
+      <button id="connect-btn">Connect & Start DH Handshake</button>
+
+      <div class="qr-container">
+        <canvas id="qr-canvas"></canvas>
+        <div id="qr-url-box" class="qr-url" style="display: none;"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-bottom: 0.8rem; font-size: 1rem; color: var(--text-muted);">Protocol & Transport Event Log</h3>
+      <div id="log-panel" class="log-panel"></div>
+    </div>
+  </div>
+
+  <script src="tz-ws.js"></script>
+  <script>
+    const statusText = document.getElementById('status-text');
+    const statusDot = document.getElementById('status-dot');
+    const logPanel = document.getElementById('log-panel');
+    const qrCanvas = document.getElementById('qr-canvas');
+    const qrUrlBox = document.getElementById('qr-url-box');
+    const connectBtn = document.getElementById('connect-btn');
+
+    function appendLog(msg) {
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      const time = new Date().toISOString().split('T')[1].slice(0, 8);
+      entry.textContent = `[${time}] ${msg}`;
+      logPanel.appendChild(entry);
+      logPanel.scrollTop = logPanel.scrollHeight;
+    }
+
+    let client = null;
+
+    async function bootstrap() {
+      client = new TzWebClient({
+        wasmUrl: 'tz.wasm',
+        apiId: parseInt(document.getElementById('api-id').value) || 611335,
+        apiHash: document.getElementById('api-hash').value || 'd524b414d21f4d37f08684c1df41ac9c',
+        dcUrl: document.getElementById('dc-select').value,
+        onStatus: (st) => {
+          statusText.textContent = st;
+        },
+        onLog: (msg) => {
+          appendLog(msg);
+        },
+        onQr: (url) => {
+          statusDot.className = 'status-dot active';
+          qrUrlBox.style.display = 'block';
+          qrUrlBox.textContent = url;
+          if (window.QRCode) {
+            qrCanvas.style.display = 'block';
+            QRCode.toCanvas(qrCanvas, url, { width: 220, margin: 1 }, (err) => {
+              if (err) console.error(err);
+            });
+          }
+        },
+        onLoginSuccess: (userId) => {
+          statusDot.className = 'status-dot active';
+          statusText.textContent = `Logged in successfully as user ${userId}!`;
+          qrCanvas.style.display = 'none';
+          qrUrlBox.textContent = 'Authorized! Ready for messaging.';
+        }
+      });
+
+      try {
+        await client.init();
+        statusDot.className = 'status-dot';
+      } catch (err) {
+        statusText.textContent = 'Failed to load WASM module';
+        appendLog(`[ERROR] ${err.message}`);
+      }
+    }
+
+    connectBtn.addEventListener('click', () => {
+      if (!client) return;
+      client.apiId = parseInt(document.getElementById('api-id').value) || 611335;
+      client.apiHash = document.getElementById('api-hash').value;
+      const dcUrl = document.getElementById('dc-select').value;
+      client.setDc(dcUrl);
+      const transportMode = parseInt(document.getElementById('transport-select').value) || 0;
+      client.setTransportMode(transportMode);
+      client.connect();
+    });
+
+    bootstrap();
+  </script>
+</body>
+</html>
