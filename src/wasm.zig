@@ -8,6 +8,7 @@ const Session = tz.Session;
 const WsTransport = tz.ws.WsTransport;
 const codec = @import("codec");
 const types = @import("types");
+const unions = @import("unions");
 const functions = @import("functions");
 const ser = codec.serialize;
 const de = codec.deserialize;
@@ -21,6 +22,10 @@ extern fn js_ws_send(ptr: [*]const u8, len: usize) void;
 extern fn js_random(ptr: [*]u8, len: usize) void;
 extern fn js_now_sec() u32;
 extern fn js_now_ms_part() u32;
+/// Message persistence bridge: called with each incoming new message so the
+/// host can store it (e.g. into the OPFS sqlite store). ptr/len reference the
+/// UTF-8 message text in wasm memory.
+extern fn js_on_message(peer_id: i64, from_id: i64, date: i32, msg_id: i64, out: bool, text_ptr: [*]const u8, text_len: usize) void;
 
 fn log(msg: []const u8) void {
     js_log(msg.ptr, msg.len);
@@ -546,4 +551,56 @@ fn handleEncryptedPayload(payload: []const u8) !void {
             return;
         }
     }
+
+    // --- push updates (updates / updatesCombined containers) ---
+    // No pts/seq ordering here (the full SyncEngine is native-side); for the
+    // POC we extract each new message and hand it to the host for storage.
+    if (cid == types.UpdatesCombined.cid) {
+        var r: std.Io.Reader = .fixed(payload[4..]);
+        const upd = try codec.decodeStructBody(types.UpdatesCombined, &r, allocator);
+        try persistUpdateContainer(upd.updates);
+        return;
+    }
+    if (cid == types.Updates.cid) {
+        var r: std.Io.Reader = .fixed(payload[4..]);
+        const upd = try codec.decodeStructBody(types.Updates, &r, allocator);
+        try persistUpdateContainer(upd.updates);
+        return;
+    }
+}
+
+fn peerIdOf(peer: unions.Peer) ?i64 {
+    return switch (peer) {
+        .PeerUser => |p| p.user_id,
+        .PeerChat => |p| p.chat_id,
+        .PeerChannel => |p| p.channel_id,
+    };
+}
+
+fn persistUpdateContainer(updates: []const unions.Update) !void {
+    for (updates) |u| switch (u) {
+        .UpdateNewMessage => |n| try persistMessage(n.message),
+        .UpdateNewChannelMessage => |n| try persistMessage(n.message),
+        .UpdateEditMessage => |n| try persistMessage(n.message),
+        .UpdateEditChannelMessage => |n| try persistMessage(n.message),
+        else => {},
+    };
+}
+
+fn persistMessage(msg: unions.Message) !void {
+    const m = switch (msg) {
+        .Message => |m| m,
+        else => return, // service/empty messages skipped for the POC
+    };
+    const peer_id = peerIdOf(m.peer_id) orelse return;
+    const from_id: i64 = if (m.from_id.value) |f| peerIdOf(f) orelse 0 else 0;
+    js_on_message(
+        peer_id,
+        from_id,
+        m.date,
+        m.id,
+        m.out.value != null,
+        m.message.ptr,
+        m.message.len,
+    );
 }
