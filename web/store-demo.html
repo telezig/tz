@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>tz — Message Store Demo (SQLite on OPFS)</title>
+  <style>
+    :root {
+      --bg: #0f172a; --card-bg: #1e293b; --accent: #38bdf8; --text: #f8fafc;
+      --text-muted: #94a3b8; --border: #334155; --success: #4ade80; --fail: #f87171;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background: var(--bg); color: var(--text); padding: 2rem; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+    .container { width: 100%; max-width: 760px; }
+    header { margin-bottom: 1.5rem; text-align: center; }
+    h1 { font-size: 1.8rem; font-weight: 800; color: var(--accent); }
+    .subtitle { color: var(--text-muted); font-size: 0.95rem; margin-top: 0.3rem; }
+    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 1.2rem; margin-bottom: 1.2rem; }
+    .row { display: flex; gap: 0.6rem; }
+    input[type=text] { flex: 1; background: #0f172a; border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.8rem; color: var(--text); font-size: 0.95rem; }
+    select { background: #0f172a; border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem; color: var(--text); }
+    button { background: var(--accent); color: #0f172a; border: none; border-radius: 6px; padding: 0.6rem 1.2rem; font-weight: 700; cursor: pointer; }
+    button:hover { background: #0ea5e9; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .msg { background: #0f172a; border: 1px solid var(--border); border-radius: 8px; padding: 0.7rem 0.9rem; margin-bottom: 0.5rem; font-size: 0.9rem; }
+    .msg .meta { color: var(--text-muted); font-size: 0.75rem; font-family: monospace; margin-bottom: 0.2rem; }
+    .msg .body { white-space: pre-wrap; word-break: break-word; }
+    .badge { font-size: 0.72rem; background: rgba(56,189,248,0.15); color: var(--accent); padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+    .pass { color: var(--success); font-weight: 700; }
+    .fail { color: var(--fail); font-weight: 700; }
+    .status { margin-top: 0.6rem; font-size: 0.85rem; color: var(--text-muted); }
+    #history { max-height: 340px; overflow-y: auto; }
+    .hint { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Message Store Demo <span class="badge">SQLite on OPFS</span></h1>
+      <p class="subtitle">Store messages into OPFS sqlite (real FileSystemSyncAccessHandle), query back, survives reload</p>
+    </header>
+
+    <div class="card">
+      <div class="row">
+        <select id="peer">
+          <option value="1001">peer 1001 (Alice)</option>
+          <option value="1002">peer 1002 (Bob)</option>
+          <option value="1003">peer 1003 (Group)</option>
+        </select>
+        <input type="text" id="msg" placeholder="message text" />
+        <button id="send">Store</button>
+      </div>
+      <div class="status" id="status">initializing...</div>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content: space-between;">
+        <h3 style="font-size: 1rem; color: var(--text-muted); margin: 0;">Stored messages</h3>
+        <button id="refresh">Refresh</button>
+      </div>
+      <div id="history" style="margin-top: 0.8rem;"></div>
+      <div class="hint">Tip: store a few messages, then <b>reload the page</b> and hit Refresh — history should still be there (OPFS persistence).</div>
+    </div>
+  </div>
+
+  <script>
+    const peerSel = document.getElementById('peer');
+    const msgInput = document.getElementById('msg');
+    const sendBtn = document.getElementById('send');
+    const refreshBtn = document.getElementById('refresh');
+    const statusEl = document.getElementById('status');
+    const historyEl = document.getElementById('history');
+
+    let worker = null;
+    let pending = {};
+
+    function setStatus(txt, cls) {
+      statusEl.textContent = txt;
+      statusEl.className = 'status' + (cls ? ' ' + cls : '');
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function renderHistory(rows) {
+      historyEl.innerHTML = '';
+      if (!rows || rows.length === 0) {
+        historyEl.innerHTML = '<div class="hint">no messages stored yet</div>';
+        return;
+      }
+      for (const r of rows) {
+        const div = document.createElement('div');
+        div.className = 'msg';
+        const when = new Date(Number(r.date) * 1000).toISOString();
+        div.innerHTML = `
+          <div class="meta">#${r.id} · peer ${r.peerId} · from ${r.fromId} · ${when} · ${r.out ? '<b>out</b>' : 'in'}</div>
+          <div class="body">${escapeHtml(r.text)}</div>`;
+        historyEl.appendChild(div);
+      }
+      setStatus(`showing ${rows.length} stored messages (persisted in OPFS)`, 'pass');
+    }
+
+    function post(type, data) {
+      return new Promise((resolve, reject) => {
+        const id = Math.random().toString(36).slice(2);
+        pending[id] = { resolve, reject };
+        worker.postMessage({ type, ...data, _id: id });
+      });
+    }
+
+    function boot() {
+      worker = new Worker('store-demo-worker.js');
+      worker.onmessage = (e) => {
+        const cb = pending[e.data._id];
+        if (e.data.type === 'ready') { setStatus('ready — database open on OPFS', 'pass'); refresh(); return; }
+        if (e.data.type === 'error') {
+          if (cb) { cb.reject(new Error(e.data.message)); delete pending[e.data._id]; }
+          else setStatus('error: ' + e.data.message, 'fail');
+          return;
+        }
+        if (cb) { cb.resolve(e.data); delete pending[e.data._id]; }
+      };
+      worker.onerror = (e) => {
+        setStatus('worker error: ' + e.message, 'fail');
+        for (const k in pending) { pending[k].reject(new Error(e.message)); delete pending[k]; }
+      };
+      worker.postMessage({ type: 'init', _id: 'init' });
+    }
+
+    async function refresh() {
+      try {
+        const r = await post('history', {});
+        renderHistory(r.rows);
+      } catch (e) {
+        setStatus('refresh failed: ' + e.message, 'fail');
+      }
+    }
+
+    sendBtn.addEventListener('click', async () => {
+      const text = msgInput.value.trim();
+      if (!text) return;
+      sendBtn.disabled = true;
+      try {
+        await post('store', { peerId: parseInt(peerSel.value), text, fromId: 611335, out: false });
+        setStatus('stored ✓ (from 611335)', 'pass');
+        msgInput.value = '';
+        await refresh();
+      } catch (e) {
+        setStatus('store failed: ' + e.message, 'fail');
+      } finally {
+        sendBtn.disabled = false;
+      }
+    });
+
+    refreshBtn.addEventListener('click', refresh);
+    boot();
+  </script>
+</body>
+</html>

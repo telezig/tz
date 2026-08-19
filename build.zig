@@ -198,11 +198,15 @@ pub fn build(b: *std.Build) void {
     });
     const install_db_bench_html = b.addInstallFileWithDir(b.path("web/db-bench.html"), .{ .custom = "web" }, "db-bench.html");
     const install_db_bench_worker = b.addInstallFileWithDir(b.path("web/db-bench-worker.js"), .{ .custom = "web" }, "db-bench-worker.js");
+    const install_store_demo_html = b.addInstallFileWithDir(b.path("web/store-demo.html"), .{ .custom = "web" }, "store-demo.html");
+    const install_store_demo_worker = b.addInstallFileWithDir(b.path("web/store-demo-worker.js"), .{ .custom = "web" }, "store-demo-worker.js");
 
     const wasm_db_step = b.step("wasm-db", "Build SQLite WASM + OPFS benchmark (zig-out/web/tz-db.wasm)");
     wasm_db_step.dependOn(&wasm_db_install.step);
     wasm_db_step.dependOn(&install_db_bench_html.step);
     wasm_db_step.dependOn(&install_db_bench_worker.step);
+    wasm_db_step.dependOn(&install_store_demo_html.step);
+    wasm_db_step.dependOn(&install_store_demo_worker.step);
 
     // --- MTProto WASM demo (existing; independent of sqlite) ---
     const wasm_codec_module = b.createModule(.{
