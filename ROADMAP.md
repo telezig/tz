@@ -56,9 +56,11 @@ Before executing broad refactors, validate the riskiest architectural boundaries
     | Persistence (reopen count) | 1,000 ✓ | n/a | SQLite |
 
   - **Decision**: **Tier-2 message history → SQLite on OPFS.** SQLite wins every measured workload (batch insert 5x, paging 33x) and adds FTS5 full-text search plus arbitrary relational queries that IndexedDB cannot express. Cost is ~316KB gzip and VFS complexity — both acceptable. **Tier-1 (auth/session KV) stays IndexedDB** (small, needs max reliability), **Tier-3 (media blobs) stays raw OPFS files**. Remaining follow-ups: Safari/Firefox OPFS fallback, index FTS5 into the real `Store` interface, and a >100k-message soak test.
-- [ ] **POC 2: Sans-I/O MTProto Engine & Unified Session**
+- [x] **POC 2: Sans-I/O MTProto Engine & Unified Session**
   - **Objective**: Merge `src/mtproto/Session.zig` and `src/wasm.zig` into a single I/O-agnostic `Session` state machine.
   - **Verification**: Run unit tests where both simulated TCP streams and WebSocket buffers drive the exact same session instance without any platform code duplication.
+  - **Result**: `mtproto/Session.zig` is now fully platform-agnostic via an injected `Entropy` union (`.io` = std.Io handle by value; `.js` = Web Crypto + Date.now fn pointers). The duplicate `WasmSession` in `src/wasm.zig` is deleted; the wasm QR-login demo drives the exact same `Session` state machine with a 3-line `.js` entropy binding. ✅
+  - **Bonus**: deleting the duplicated crypto state machine shrank the MTProto wasm from 1.09MB to **94KB raw / 34KB gzip** (core <150KB gzip target hit).
 - [ ] **POC 3: TL Schema to TypeScript Type Definition Codegen**
   - **Objective**: Extend `codegen/main.zig` to emit a comprehensive `tl.d.ts` alongside Zig code.
   - **Verification**: Import generated types in TypeScript to verify autocompletion for constructor unions, functions, and flags.

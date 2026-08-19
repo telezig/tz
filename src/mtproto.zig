@@ -119,7 +119,7 @@ pub fn MtProto(comptime Handler: type) type {
         fn encryptLocked(self: *Self, plaintext: []const u8, io: Io, content_related: bool) !Session.EncryptResult {
             self.encrypt_mutex.lockUncancelable(io);
             defer self.encrypt_mutex.unlock(io);
-            return self.session.encrypt(plaintext, self.allocator, io, content_related);
+            return self.session.encrypt(plaintext, self.allocator, content_related);
         }
 
         /// Send a serialized TL request, return the raw response bytes (caller frees).
@@ -229,7 +229,7 @@ pub fn MtProto(comptime Handler: type) type {
                     switch (m.error_code) {
                         // Msg ID too low/high: correct clock offset from server msg_id.
                         16, 17 => {
-                            self.session.correctTimeOffset(msg_id, io);
+                            self.session.correctTimeOffset(msg_id);
                             self.retryPending(io);
                         },
                         // Other seqno/msg_id issues: retry with corrected values.

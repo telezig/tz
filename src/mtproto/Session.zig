@@ -5,6 +5,42 @@ const Allocator = std.mem.Allocator;
 const aes_ige = @import("../crypto/aes_ige.zig");
 const sha = @import("../crypto/sha.zig");
 
+/// Platform entropy+clock source. Session is fully platform-agnostic: the
+/// caller picks which backend drives it — no std.Io dependency inside the
+/// state machine, so the exact same Session runs on native and wasm.
+///   .io — native: backed by a std.Io handle (io.random + Timestamp.now)
+///   .js — wasm: backed by function pointers (Web Crypto + Date.now)
+pub const Entropy = union(enum) {
+    io: Io,
+    js: Js,
+
+    pub const Js = struct {
+        random: *const fn (buf: []u8) void,
+        now_ms: *const fn () i64,
+    };
+
+    pub fn random(self: Entropy, buf: []u8) void {
+        switch (self) {
+            .io => |io| io.random(buf),
+            .js => |js| js.random(buf),
+        }
+    }
+    pub fn nowMs(self: Entropy) i64 {
+        return switch (self) {
+            .io => |io| blk: {
+                const ns = std.Io.Timestamp.now(io, .real).nanoseconds;
+                break :blk @intCast(@divTrunc(ns, std.time.ns_per_ms));
+            },
+            .js => |js| js.now_ms(),
+        };
+    }
+};
+
+/// Native: entropy from a std.Io handle (stored by value — no lifetime issue).
+pub fn ioEntropy(io: Io) Entropy {
+    return .{ .io = io };
+}
+
 auth_key: [256]u8,
 auth_key_id: i64,
 server_salt: i64,
@@ -12,17 +48,19 @@ session_id: i64,
 seq_no: u32 = 0,
 last_msg_id: i64 = 0,
 time_offset: i64 = 0,
+entropy: Entropy,
 encrypt_scratch: std.ArrayListUnmanaged(u8) = .empty,
 decrypt_scratch: std.ArrayListUnmanaged(u8) = .empty,
 
-pub fn init(auth_key: [256]u8, auth_key_id: i64, server_salt: i64, io: Io) Session {
+pub fn init(auth_key: [256]u8, auth_key_id: i64, server_salt: i64, entropy: Entropy) Session {
     var sid_buf: [8]u8 = undefined;
-    io.random(&sid_buf);
+    entropy.random(&sid_buf);
     return .{
         .auth_key = auth_key,
         .auth_key_id = auth_key_id,
         .server_salt = server_salt,
         .session_id = @bitCast(sid_buf),
+        .entropy = entropy,
     };
 }
 
@@ -31,18 +69,18 @@ pub fn deinit(self: *Session, allocator: Allocator) void {
     self.decrypt_scratch.deinit(allocator);
 }
 
-pub fn correctTimeOffset(self: *Session, server_msg_id: i64, io: Io) void {
+pub fn correctTimeOffset(self: *Session, server_msg_id: i64) void {
     const server_s = server_msg_id >> 32;
-    const local_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
-    const local_s: i64 = @intCast(@divTrunc(local_ns, std.time.ns_per_s));
+    const local_ms = self.entropy.nowMs();
+    const local_s = @divTrunc(local_ms, std.time.ms_per_s);
     self.time_offset = server_s - local_s;
     std.log.debug("time_offset corrected to {}s", .{self.time_offset});
 }
 
-pub fn nextMsgId(self: *Session, io: Io) i64 {
-    const now_ns = std.Io.Timestamp.now(io, .real).nanoseconds;
-    const unix_s = @divTrunc(now_ns, std.time.ns_per_s) + self.time_offset;
-    const frac = @rem(now_ns, std.time.ns_per_s);
+pub fn nextMsgId(self: *Session) i64 {
+    const now_ms = self.entropy.nowMs();
+    const unix_s = @divTrunc(now_ms, std.time.ms_per_s) + self.time_offset;
+    const frac = @rem(now_ms, std.time.ms_per_s);
     const unix_s_u: u64 = @intCast(unix_s);
     const frac_u: u64 = @intCast(frac & ~@as(@TypeOf(frac), 3));
     var id: i64 = @bitCast((unix_s_u << 32) | frac_u);
@@ -85,7 +123,7 @@ fn kdf(auth_key: *const [256]u8, msg_key: *const [16]u8, x: usize, key: *[32]u8,
 
 pub const EncryptResult = struct { data: []u8, msg_id: i64 };
 
-pub fn encrypt(self: *Session, plaintext: []const u8, allocator: Allocator, io: Io, content_related: bool) !EncryptResult {
+pub fn encrypt(self: *Session, plaintext: []const u8, allocator: Allocator, content_related: bool) !EncryptResult {
     const pad_len = blk: {
         const unpadded = plaintext.len + 32;
         const rem = (unpadded + 12) % 16;
@@ -95,14 +133,14 @@ pub fn encrypt(self: *Session, plaintext: []const u8, allocator: Allocator, io: 
     try self.encrypt_scratch.resize(allocator, inner_len);
     const inner = self.encrypt_scratch.items;
 
-    const msg_id = self.nextMsgId(io);
+    const msg_id = self.nextMsgId();
     std.mem.writeInt(i64, inner[0..8], self.server_salt, .little);
     std.mem.writeInt(i64, inner[8..16], self.session_id, .little);
     std.mem.writeInt(i64, inner[16..24], msg_id, .little);
     std.mem.writeInt(u32, inner[24..28], self.nextSeqNo(content_related), .little);
     std.mem.writeInt(u32, inner[28..32], @intCast(plaintext.len), .little);
     @memcpy(inner[32..][0..plaintext.len], plaintext);
-    io.random(inner[32 + plaintext.len ..]);
+    self.entropy.random(inner[32 + plaintext.len ..]);
 
     // msg_key = SHA256(auth_key[88..120] ++ inner)[8..24]
     const msg_key_full = sha.sha256Cat(self.auth_key[88..120], inner);
@@ -158,14 +196,15 @@ test "message encrypt/decrypt roundtrip" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    const entropy = ioEntropy(io);
     var key: [256]u8 = undefined;
     for (&key, 0..) |*b, i| b.* = @intCast(i % 256);
-    var session = Session.init(key, 0xdeadbeef, 12345, io);
+    var session = Session.init(key, 0xdeadbeef, 12345, entropy);
     defer session.deinit(allocator);
     const plaintext = "Hello, MTProto 2.0!";
 
     // Verify client→server output has correct structure (auth_key_id + msg_key + ciphertext).
-    const encrypted = try session.encrypt(plaintext, allocator, io, true);
+    const encrypted = try session.encrypt(plaintext, allocator, true);
     defer allocator.free(encrypted.data);
     try std.testing.expect(encrypted.data.len >= 24);
     try std.testing.expectEqual(session.auth_key_id, std.mem.readInt(i64, encrypted.data[0..8], .little));
@@ -207,4 +246,40 @@ test "message encrypt/decrypt roundtrip" {
     // payload borrows session.decrypt_scratch (freed by session.deinit); don't free it here.
     const decrypted = try session.decrypt(server_msg, allocator);
     try std.testing.expectEqualSlices(u8, plaintext, decrypted.payload);
+}
+
+test "session driven by fake entropy (wasm-shaped)" {
+    // Same state machine, driven by a pure-Zig entropy impl that mimics what
+    // the wasm binding will provide (Web Crypto + Date.now). This is the POC2
+    // proof: no platform code inside Session, any entropy source drives it.
+    const allocator = std.testing.allocator;
+
+    var counter: u64 = 0;
+    const Fake = struct {
+        var tick: u64 = 0;
+        fn random(_: []u8) void {}
+        fn nowMs() i64 {
+            tick += 1000; // advance 1s per call
+            return 1700000000000 + @as(i64, @intCast(tick));
+        }
+    };
+    counter = 0; // silence unused
+    _ = &counter;
+
+    var key: [256]u8 = undefined;
+    @memset(&key, 0x11);
+    var session = Session.init(key, 0x1234, 999, .{ .js = .{
+        .random = Fake.random,
+        .now_ms = Fake.nowMs,
+    } });
+    defer session.deinit(allocator);
+
+    const e1 = try session.encrypt("first", allocator, true);
+    defer allocator.free(e1.data);
+    const e2 = try session.encrypt("second", allocator, true);
+    defer allocator.free(e2.data);
+    try std.testing.expect(e2.msg_id > e1.msg_id); // msg_id monotonic
+
+    // seq numbers advance for content-related messages (2 messages -> 2)
+    try std.testing.expectEqual(@as(u32, 2), session.seq_no);
 }

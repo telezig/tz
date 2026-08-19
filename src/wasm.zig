@@ -4,6 +4,7 @@ const sha = tz.crypto.sha;
 const rsa = tz.crypto.rsa;
 const dh = tz.crypto.dh;
 const aes_ige = tz.crypto.aes_ige;
+const Session = tz.Session;
 const WsTransport = tz.ws.WsTransport;
 const codec = @import("codec");
 const types = @import("types");
@@ -45,6 +46,25 @@ export fn tz_free(ptr: [*]u8, len: usize) void {
 fn fillRandom(buf: []u8) void {
     js_random(buf.ptr, buf.len);
 }
+
+fn wasmNowMs() i64 {
+    // ms since epoch: sec*1000 + ms_part
+    return @as(i64, @intCast(js_now_sec())) * 1000 + @as(i64, @intCast(js_now_ms_part()));
+}
+
+/// The unified Session's platform entropy for wasm: Web Crypto + Date.now.
+const wasm_entropy = Session.Entropy{ .js = .{
+    .random = struct {
+        fn f(buf: []u8) void {
+            fillRandom(buf);
+        }
+    }.f,
+    .now_ms = struct {
+        fn f() i64 {
+            return wasmNowMs();
+        }
+    }.f,
+} };
 
 // Telegram Server RSA Public Key (Standard Telegram DC Key)
 const serverKeyN: [256]u8 = .{
@@ -181,122 +201,6 @@ fn sendEncryptedMsg(ciphertext: []const u8) !void {
 }
 
 // Session State for Encrypted Messaging
-const WasmSession = struct {
-    auth_key: [256]u8 = undefined,
-    auth_key_id: i64 = 0,
-    server_salt: i64 = 0,
-    session_id: i64 = 0,
-    seq_no: u32 = 0,
-    last_msg_id: i64 = 0,
-    time_offset: i64 = 0,
-    encrypt_scratch: std.ArrayListUnmanaged(u8) = .empty,
-    decrypt_scratch: std.ArrayListUnmanaged(u8) = .empty,
-
-    fn init(auth_key_val: [256]u8, auth_key_id_val: i64, server_salt_val: i64, time_offset_val: i64) WasmSession {
-        var sid_buf: [8]u8 = undefined;
-        fillRandom(&sid_buf);
-        return .{
-            .auth_key = auth_key_val,
-            .auth_key_id = auth_key_id_val,
-            .server_salt = server_salt_val,
-            .session_id = @bitCast(sid_buf),
-            .time_offset = time_offset_val,
-        };
-    }
-
-    fn deinit(self: *WasmSession) void {
-        self.encrypt_scratch.deinit(allocator);
-        self.decrypt_scratch.deinit(allocator);
-    }
-
-    fn nextMsgId(self: *WasmSession) i64 {
-        const sec = @as(i64, @intCast(js_now_sec())) + self.time_offset;
-        const ms_part = js_now_ms_part();
-        return generateMsgId(sec, ms_part, &self.last_msg_id);
-    }
-
-    fn nextSeqNo(self: *WasmSession, content_related: bool) u32 {
-        const no = self.seq_no * 2 + if (content_related) @as(u32, 1) else 0;
-        if (content_related) self.seq_no += 1;
-        return no;
-    }
-
-    fn kdf(self: *const WasmSession, msg_key: *const [16]u8, x: usize, key: *[32]u8, iv: *[32]u8) void {
-        var sha_a_in: [52]u8 = undefined;
-        @memcpy(sha_a_in[0..16], msg_key);
-        @memcpy(sha_a_in[16..52], self.auth_key[x .. x + 36]);
-        const sha_a = sha.sha256(&sha_a_in);
-
-        var sha_b_in: [52]u8 = undefined;
-        @memcpy(sha_b_in[0..36], self.auth_key[40 + x .. 76 + x]);
-        @memcpy(sha_b_in[36..52], msg_key);
-        const sha_b = sha.sha256(&sha_b_in);
-
-        @memcpy(key[0..8], sha_a[0..8]);
-        @memcpy(key[8..24], sha_b[8..24]);
-        @memcpy(key[24..32], sha_a[24..32]);
-
-        @memcpy(iv[0..8], sha_b[0..8]);
-        @memcpy(iv[8..24], sha_a[8..24]);
-        @memcpy(iv[24..32], sha_b[24..32]);
-    }
-
-    fn encrypt(self: *WasmSession, plaintext: []const u8, content_related: bool) ![]u8 {
-        const pad_len = blk: {
-            const unpadded = plaintext.len + 32;
-            const rem = (unpadded + 12) % 16;
-            break :blk if (rem == 0) 12 else 12 + (16 - rem);
-        };
-        const inner_len = 32 + plaintext.len + pad_len;
-        try self.encrypt_scratch.resize(allocator, inner_len);
-        const inner = self.encrypt_scratch.items;
-
-        const msg_id = self.nextMsgId();
-        std.mem.writeInt(i64, inner[0..8], self.server_salt, .little);
-        std.mem.writeInt(i64, inner[8..16], self.session_id, .little);
-        std.mem.writeInt(i64, inner[16..24], msg_id, .little);
-        std.mem.writeInt(u32, inner[24..28], self.nextSeqNo(content_related), .little);
-        std.mem.writeInt(u32, inner[28..32], @intCast(plaintext.len), .little);
-        @memcpy(inner[32..][0..plaintext.len], plaintext);
-        fillRandom(inner[32 + plaintext.len ..]);
-
-        const msg_key_full = sha.sha256Cat(self.auth_key[88..120], inner);
-        const msg_key: *const [16]u8 = msg_key_full[8..24];
-
-        var aes_key: [32]u8 = undefined;
-        var aes_iv: [32]u8 = undefined;
-        self.kdf(msg_key, 0, &aes_key, &aes_iv);
-        aes_ige.encrypt(aes_key, aes_iv, inner);
-
-        const out = try allocator.alloc(u8, 8 + 16 + inner_len);
-        std.mem.writeInt(i64, out[0..8], self.auth_key_id, .little);
-        @memcpy(out[8..24], msg_key);
-        @memcpy(out[24..], inner);
-        return out;
-    }
-
-    fn decrypt(self: *WasmSession, ciphertext: []const u8) ![]u8 {
-        if (ciphertext.len < 24) return error.TooShort;
-        const frame_key_id = std.mem.readInt(i64, ciphertext[0..8], .little);
-        if (frame_key_id != self.auth_key_id) return error.AuthKeyMismatch;
-        const msg_key: *const [16]u8 = ciphertext[8..24];
-        const encrypted = ciphertext[24..];
-
-        var aes_key: [32]u8 = undefined;
-        var aes_iv: [32]u8 = undefined;
-        self.kdf(msg_key, 8, &aes_key, &aes_iv);
-
-        if (encrypted.len < 32 or encrypted.len % 16 != 0) return error.BadLength;
-        try self.decrypt_scratch.resize(allocator, encrypted.len);
-        const inner = self.decrypt_scratch.items;
-        @memcpy(inner, encrypted);
-        aes_ige.decrypt(aes_key, aes_iv, inner);
-
-        const msg_len = std.mem.readInt(u32, inner[28..32], .little);
-        if (32 + msg_len > inner.len) return error.BadLength;
-        return try allocator.dupe(u8, inner[32 .. 32 + msg_len]);
-    }
-};
 
 // Global Client State
 const Stage = enum {
@@ -318,7 +222,7 @@ var new_nonce: [32]u8 = undefined;
 var tmp_key: [32]u8 = undefined;
 var tmp_iv: [32]u8 = undefined;
 
-var session: ?WasmSession = null;
+var session: ?Session = null;
 
 export fn tz_init(app_id: i32, hash_ptr: [*]const u8, hash_len: usize) void {
     api_id = app_id;
@@ -515,8 +419,9 @@ fn handleMtprotoFrame(frame: []const u8) !void {
                 const local_s: i32 = @intCast(js_now_sec());
                 const time_offset: i64 = @intCast(server_time - local_s);
 
-                if (session) |*s| s.deinit();
-                session = WasmSession.init(dh_result.secret, auth_key_id, server_salt, time_offset);
+                if (session) |*s| s.deinit(allocator);
+                session = Session.init(dh_result.secret, auth_key_id, server_salt, wasm_entropy);
+                session.?.time_offset = time_offset;
 
                 try sendPlainMsg(sw.buffered());
                 stage = .set_client_dh_sent;
@@ -536,12 +441,12 @@ fn handleMtprotoFrame(frame: []const u8) !void {
 
     // Handle encrypted frames
     if (session) |*s| {
-        const payload = s.decrypt(frame) catch {
+        const decrypted = s.decrypt(frame, allocator) catch {
             log("Decrypt error on incoming frame");
             return;
         };
-        defer allocator.free(payload);
-        try handleEncryptedPayload(payload);
+        // payload borrows session.decrypt_scratch — consumed synchronously here.
+        try handleEncryptedPayload(decrypted.payload);
     }
 }
 
@@ -585,10 +490,10 @@ fn exportLoginQr() !void {
     const wrapped = try wrapInit(allocator, api_id, req_bytes);
     defer allocator.free(wrapped);
 
-    const enc = try session.?.encrypt(wrapped, true);
-    defer allocator.free(enc);
+    const enc = try session.?.encrypt(wrapped, allocator, true);
+    defer allocator.free(enc.data);
 
-    try sendEncryptedMsg(enc);
+    try sendEncryptedMsg(enc.data);
     setStatus("auth.exportLoginToken sent, awaiting login token...");
 }
 

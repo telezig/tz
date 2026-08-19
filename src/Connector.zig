@@ -126,7 +126,7 @@ pub fn connect(io: Io, allocator: Allocator, opts: Options) !*Connector {
         auth_key_result.auth_key,
         auth_key_result.auth_key_id,
         auth_key_result.server_salt,
-        io,
+        Session.ioEntropy(io),
     );
 
     const self = try allocator.create(Connector);
