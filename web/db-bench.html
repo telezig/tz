@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>tz — SQLite WASM + OPFS vs IndexedDB Benchmark</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --accent: #38bdf8;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --border: #334155;
+      --success: #4ade80;
+      --fail: #f87171;
+      --warn: #fbbf24;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background-color: var(--bg); color: var(--text); padding: 2rem; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+    .container { width: 100%; max-width: 860px; }
+    header { margin-bottom: 2rem; text-align: center; }
+    h1 { font-size: 2rem; font-weight: 800; color: var(--accent); margin-bottom: 0.5rem; }
+    .subtitle { color: var(--text-muted); font-size: 1rem; }
+    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; }
+    .row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+    label { font-size: 0.85rem; font-weight: 600; color: var(--text-muted); }
+    select, input { background: #0f172a; border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.8rem; color: var(--text); font-size: 0.95rem; }
+    button { background: var(--accent); color: #0f172a; border: none; border-radius: 6px; padding: 0.7rem 1.5rem; font-size: 1rem; font-weight: 700; cursor: pointer; }
+    button:hover { background: #0ea5e9; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+    th, td { text-align: left; padding: 0.6rem 0.8rem; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+    th { color: var(--text-muted); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; }
+    .num { text-align: right; font-family: monospace; }
+    .pass { color: var(--success); font-weight: 700; }
+    .fail { color: var(--fail); font-weight: 700; }
+    .warn { color: var(--warn); font-weight: 700; }
+    .log-panel { background: #090d16; border: 1px solid var(--border); border-radius: 8px; padding: 1rem; height: 220px; overflow-y: auto; font-family: monospace; font-size: 0.82rem; color: #cbd5e1; }
+    .log-entry { margin-bottom: 0.3rem; }
+    #verdict { font-size: 1.1rem; font-weight: 700; margin-top: 0.5rem; }
+    .badge { font-size: 0.75rem; background: rgba(56,189,248,0.15); color: var(--accent); padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>POC1: SQLite WASM + OPFS <span class="badge">vs IndexedDB</span></h1>
+      <p class="subtitle">Tier-2 storage decision spike — message history path</p>
+    </header>
+
+    <div class="card">
+      <div class="row" style="margin-bottom: 1rem;">
+        <div>
+          <label for="n">Messages per run</label>
+          <input id="n" type="number" value="1000" min="100" max="100000" style="width: 120px;" />
+        </div>
+        <div>
+          <button id="run-btn">Run Benchmark</button>
+        </div>
+      </div>
+      <div id="verdict"></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-bottom: 0.8rem; font-size: 1rem; color: var(--text-muted);">Results</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th>OPFS SQLite</th>
+            <th>IndexedDB</th>
+            <th>Winner</th>
+          </tr>
+        </thead>
+        <tbody id="results-body">
+          <tr><td colspan="4" style="color: var(--text-muted);">Run the benchmark to populate results.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-bottom: 0.8rem; font-size: 1rem; color: var(--text-muted);">Log</h3>
+      <div id="log-panel" class="log-panel"></div>
+    </div>
+  </div>
+
+  <script>
+    const runBtn = document.getElementById('run-btn');
+    const resultsBody = document.getElementById('results-body');
+    const logPanel = document.getElementById('log-panel');
+    const verdictEl = document.getElementById('verdict');
+
+    function appendLog(msg) {
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      const time = new Date().toISOString().split('T')[1].slice(0, 12);
+      entry.textContent = `[${time}] ${msg}`;
+      logPanel.appendChild(entry);
+      logPanel.scrollTop = logPanel.scrollHeight;
+    }
+
+    function fmtNum(n) {
+      if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+      return String(Math.round(n));
+    }
+
+    function setResults(rows) {
+      resultsBody.innerHTML = '';
+      for (const r of rows) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${r.name}</td>
+          <td class="num">${r.sqlite}</td>
+          <td class="num">${r.idb}</td>
+          <td class="${r.winner === 'sqlite' ? 'pass' : r.winner === 'idb' ? 'fail' : 'warn'}">${r.winnerText}</td>`;
+        resultsBody.appendChild(tr);
+      }
+    }
+
+    runBtn.addEventListener('click', async () => {
+      const n = parseInt(document.getElementById('n').value) || 1000;
+      runBtn.disabled = true;
+      verdictEl.textContent = 'Running...';
+      verdictEl.className = '';
+      try {
+        const worker = new Worker('db-bench-worker.js');
+        const result = await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('benchmark worker timed out')), 120000);
+          worker.onmessage = (e) => {
+            if (e.data.type === 'log') { appendLog(e.data.msg); return; }
+            clearTimeout(timeout);
+            resolve(e.data);
+          };
+          worker.onerror = (e) => { clearTimeout(timeout); reject(new Error(e.message)); };
+          worker.postMessage({ type: 'run', n });
+        });
+        worker.terminate();
+
+        if (!result.ok) {
+          verdictEl.textContent = `FAILED: ${result.error}`;
+          verdictEl.className = 'fail';
+          setResults([]);
+          return;
+        }
+
+        // Build results table.
+        const rows = [
+          {
+            name: `Insert ${fmtNum(n)} msgs (ms)`,
+            sqlite: result.sqlite.insert_ms + ' ms',
+            idb: result.idb.insert_ms + ' ms',
+            winner: result.sqlite.insert_ms < result.idb.insert_ms ? 'sqlite' : 'idb',
+            winnerText: result.sqlite.insert_ms < result.idb.insert_ms ? 'SQLite' : 'IndexedDB',
+          },
+          {
+            name: `Count query (ms)`,
+            sqlite: result.sqlite.count_ms + ' ms',
+            idb: result.idb.count_ms + ' ms',
+            winner: result.sqlite.count_ms < result.idb.count_ms ? 'sqlite' : 'idb',
+            winnerText: result.sqlite.count_ms < result.idb.count_ms ? 'SQLite' : 'IndexedDB',
+          },
+          {
+            name: `Page 10×100 (ms)`,
+            sqlite: result.sqlite.page_ms + ' ms',
+            idb: result.idb.page_ms + ' ms',
+            winner: result.sqlite.page_ms < result.idb.page_ms ? 'sqlite' : 'idb',
+            winnerText: result.sqlite.page_ms < result.idb.page_ms ? 'SQLite' : 'IndexedDB',
+          },
+          {
+            name: `Insert rate (msgs/s)`,
+            sqlite: (n / (result.sqlite.insert_ms / 1000)).toFixed(0),
+            idb: (n / (result.idb.insert_ms / 1000)).toFixed(0),
+            winner: 'tie',
+            winnerText: '—',
+          },
+          {
+            name: `Persistence (reopen count)`,
+            sqlite: result.sqlite.reopen_count,
+            idb: 'n/a',
+            winner: 'sqlite',
+            winnerText: 'SQLite ✓',
+          },
+          {
+            name: `WASM bundle (gzip)`,
+            sqlite: result.sqlite.bundle_gzip_kb + ' KB',
+            idb: 'n/a',
+            winner: 'tie',
+            winnerText: '—',
+          },
+        ];
+        setResults(rows);
+
+        const sqliteRate = n / (result.sqlite.insert_ms / 1000);
+        const verdictParts = [];
+        verdictParts.push(`SQLite insert rate: ${sqliteRate.toFixed(0)} msgs/s (target >20k)`);
+        verdictParts.push(result.sqlite.reopen_count === n ? 'Persistence: PASS' : 'Persistence: FAIL');
+        if (result.sqlite.insert_ms < result.idb.insert_ms) {
+          verdictParts.push('Verdict: SQLite wins on this workload');
+          verdictEl.className = 'pass';
+        } else {
+          verdictParts.push('Verdict: IndexedDB wins or ties — reconsider sqlite');
+          verdictEl.className = 'fail';
+        }
+        verdictEl.textContent = verdictParts.join(' · ');
+      } catch (err) {
+        verdictEl.textContent = `Benchmark error: ${err.message}`;
+        verdictEl.className = 'fail';
+      } finally {
+        runBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

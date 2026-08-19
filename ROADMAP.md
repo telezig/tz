@@ -37,9 +37,15 @@ This document outlines the strategic roadmap for evolving `tz` from a lightweigh
 
 Before executing broad refactors, validate the riskiest architectural boundaries with minimal prototypes:
 
-- [ ] **POC 1: Zig + SQLite WASM + OPFS Feasibility**
-  - **Objective**: Compile `sqlite3.c` directly to `wasm32-freestanding` via Zig's C compiler.
-  - **Verification**: Execute 1,000 synchronous batch inserts and queries in a Web Worker using `FileSystemSyncAccessHandle` via OPFS; benchmark bundle size (<400KB) and throughput (>20,000 msgs/sec).
+- [ ] **POC 1: Zig + SQLite WASM + OPFS vs IndexedDB**
+  - **Objective**: Compile `sqlite3.c` directly to `wasm32-freestanding` via Zig's C compiler, wire it to OPFS through a custom VFS, and **decide the Tier-2 message-history storage path by benchmark, not by assumption**.
+  - **Motivation**: tz is a core engine; UI/framework cost dominates total bundle size, so size is not the differentiator. The real question is whether sqlite-on-OPFS beats IndexedDB for message history (relational queries, FTS5, batch writes) — and whether its VFS complexity + ~300KB gzip + Safari/Firefox caveats are worth it.
+  - **Verification**:
+    - Compile + OPFS VFS correctness: 1,000 synchronous batch inserts/queries in a Web Worker via `FileSystemSyncAccessHandle`; **persistence asserted** (close → reopen → count still 1,000).
+    - A/B benchmark on the same workload using the real `messages/peers/dialogs` schema: OPFS sqlite vs IndexedDB (batch put, cursor paging, simple filtering). Report throughput and latency for both.
+    - Bundle size recorded as gzip (transport size): target core <150KB gzip, sqlite <300KB gzip.
+    - Capability detection & fallback: Chrome full OPFS; Safari/Firefox degrade to IndexedDB or memory — no hard dependency.
+    - **Output**: a decision note — message history → sqlite (OPFS) or IndexedDB; auth/session KV stays IndexedDB either way (Tier 1), media blobs stay raw OPFS files (Tier 3).
 - [ ] **POC 2: Sans-I/O MTProto Engine & Unified Session**
   - **Objective**: Merge `src/mtproto/Session.zig` and `src/wasm.zig` into a single I/O-agnostic `Session` state machine.
   - **Verification**: Run unit tests where both simulated TCP streams and WebSocket buffers drive the exact same session instance without any platform code duplication.

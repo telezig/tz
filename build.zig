@@ -50,6 +50,9 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // --- Core tz module: pure Zig, no sqlite, no libc.
+    // Storage/Store backends (e.g. sqlite) are injected at the call site, so
+    // consumers who don't need persistence never pull in sqlite3.c.
     const mod = b.addModule("tz", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -72,8 +75,49 @@ pub fn build(b: *std.Build) void {
         .install_subdir = "docs",
     }).step);
 
+    // --- SQLite dependency & flags (shared by native and wasm backends) ---
+    const sqlite_dep = b.dependency("sqlite", .{});
+
+    const base_sqlite_flags = &[_][]const u8{
+        "-std=c99",
+        "-DSQLITE_DQS=0",
+        "-DSQLITE_DEFAULT_MEMSTATUS=0",
+        "-DSQLITE_ENABLE_FTS5=1",
+        "-DSQLITE_OMIT_DEPRECATED=1",
+        "-DSQLITE_OMIT_PROGRESS_CALLBACK=1",
+        "-DSQLITE_OMIT_LOAD_EXTENSION=1",
+        "-DSQLITE_TEMP_STORE=3",
+        "-DSQLITE_OMIT_JSON=1",
+        "-DSQLITE_OMIT_DATETIME_FUNCS=1",
+        "-DNDEBUG=1",
+    };
+
+    const native_sqlite_flags = base_sqlite_flags ++ &[_][]const u8{
+        "-DSQLITE_THREADSAFE=1",
+    };
+
+    const wasm_sqlite_flags = base_sqlite_flags ++ &[_][]const u8{
+        "-DSQLITE_OS_OTHER=1",
+        "-DSQLITE_THREADSAFE=0",
+        "-DSQLITE_OMIT_WAL=1",
+    };
+
+    // --- Native sqlite backend module (optional; consumers import "tz_db").
+    // Used by CLI/desktop builds that want local message history, or by tests.
+    const db_mod = b.addModule("tz_db", .{
+        .root_source_file = b.path("src/db.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    db_mod.addCSourceFile(.{
+        .file = sqlite_dep.path("sqlite3.c"),
+        .flags = native_sqlite_flags,
+    });
+    db_mod.addIncludePath(sqlite_dep.path(""));
+    db_mod.link_libc = true;
+
     const test_step = b.step("test", "Run tests");
-    for (&[_]*std.Build.Module{ mod, codec_module }) |m|
+    for (&[_]*std.Build.Module{ mod, codec_module, db_mod }) |m|
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
 
     const examples = &[_]struct { name: []const u8, extra_imports: []const std.Build.Module.Import }{
@@ -116,6 +160,40 @@ pub fn build(b: *std.Build) void {
         .os_tag = .freestanding,
     });
 
+    // --- SQLite WASM backend (src/db/wasm_db.zig): sqlite3.c compiled for
+    // wasm32-freestanding with SQLITE_OS_OTHER, OPFS VFS, and a libc shim.
+    const wasm_db_mod = b.createModule(.{
+        .root_source_file = b.path("src/db/wasm_db.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+    });
+    wasm_db_mod.addCSourceFile(.{
+        .file = sqlite_dep.path("sqlite3.c"),
+        .flags = wasm_sqlite_flags,
+    });
+    wasm_db_mod.addIncludePath(sqlite_dep.path(""));
+    // wasm32-freestanding ships no libc headers; sqlite3.c needs stubs.
+    wasm_db_mod.addIncludePath(b.path("src/db/wasm_headers"));
+
+    const wasm_db_exe = b.addExecutable(.{
+        .name = "tz-db",
+        .root_module = wasm_db_mod,
+    });
+    wasm_db_exe.entry = .disabled;
+    wasm_db_exe.rdynamic = true;
+
+    const wasm_db_install = b.addInstallArtifact(wasm_db_exe, .{
+        .dest_dir = .{ .override = .{ .custom = "web" } },
+    });
+    const install_db_bench_html = b.addInstallFileWithDir(b.path("web/db-bench.html"), .{ .custom = "web" }, "db-bench.html");
+    const install_db_bench_worker = b.addInstallFileWithDir(b.path("web/db-bench-worker.js"), .{ .custom = "web" }, "db-bench-worker.js");
+
+    const wasm_db_step = b.step("wasm-db", "Build SQLite WASM + OPFS benchmark (zig-out/web/tz-db.wasm)");
+    wasm_db_step.dependOn(&wasm_db_install.step);
+    wasm_db_step.dependOn(&install_db_bench_html.step);
+    wasm_db_step.dependOn(&install_db_bench_worker.step);
+
+    // --- MTProto WASM demo (existing; independent of sqlite) ---
     const wasm_codec_module = b.createModule(.{
         .root_source_file = b.path("src/tl/codec.zig"),
         .target = wasm_target,
