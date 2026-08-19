@@ -5,7 +5,9 @@ pub const Database = @import("db/Database.zig").Database;
 pub const Statement = @import("db/Database.zig").Statement;
 pub const StepResult = @import("db/Database.zig").StepResult;
 pub const Schema = @import("db/schema.zig").Schema;
-pub const Store = @import("Store.zig");
+/// Store types come from the core `tz` module (imported by build.zig as
+/// `store`); this re-export lets tz_db users reach them through one module.
+pub const Store = @import("store");
 pub const StoreSqlite = @import("db/Store.Sqlite.zig").Sqlite;
 
 test "in-memory sqlite test" {

@@ -4,7 +4,7 @@
 //! want sqlite persistence link sqlite3.c. Uses the shared schema from
 //! `schema.zig` (messages / peers / dialogs / kv_meta).
 const std = @import("std");
-const Store = @import("../Store.zig");
+const Store = @import("store");
 const Database = @import("Database.zig").Database;
 const Statement = @import("Database.zig").Statement;
 const StepResult = @import("Database.zig").StepResult;
@@ -79,7 +79,7 @@ pub const Sqlite = struct {
     fn upsertMessage(ptr: *anyopaque, _: std.Io, gpa: std.mem.Allocator, row: Store.MessageRow) anyerror!void {
         const self: *Sqlite = @ptrCast(@alignCast(ptr));
         _ = gpa;
-        const stmt = try self.db.prepare(
+        var stmt = try self.db.prepare(
             \\INSERT INTO messages (id, peer_id, from_id, date, message, media_type, media_data, out, flags)
             \\VALUES (?,?,?,?,?,?,?,?,?)
             \\ON CONFLICT(id) DO UPDATE SET
@@ -102,7 +102,7 @@ pub const Sqlite = struct {
 
     fn queryMessages(ptr: *anyopaque, _: std.Io, gpa: std.mem.Allocator, peer_id: i64, limit: u32) anyerror![]Store.MessageRow {
         const self: *Sqlite = @ptrCast(@alignCast(ptr));
-        const stmt = try self.db.prepare(
+        var stmt = try self.db.prepare(
             \\SELECT id, peer_id, from_id, date, message, media_type, media_data, out, flags
             \\FROM messages WHERE peer_id = ? ORDER BY date DESC, id DESC LIMIT ?;
         );
@@ -110,7 +110,7 @@ pub const Sqlite = struct {
         try stmt.bindInt64(1, peer_id);
         try stmt.bindInt(2, @intCast(limit));
 
-        var rows = std.ArrayListUnmanaged(Store.MessageRow){};
+        var rows: std.ArrayListUnmanaged(Store.MessageRow) = .empty;
         errdefer {
             for (rows.items) |r| {
                 gpa.free(r.message);
@@ -140,7 +140,7 @@ pub const Sqlite = struct {
 
     fn upsertPeer(ptr: *anyopaque, _: std.Io, _: std.mem.Allocator, row: Store.PeerRow) anyerror!void {
         const self: *Sqlite = @ptrCast(@alignCast(ptr));
-        const stmt = try self.db.prepare(
+        var stmt = try self.db.prepare(
             \\INSERT INTO peers (id, access_hash, type, username, title, updated_at)
             \\VALUES (?,?,?,?,?,?)
             \\ON CONFLICT(id) DO UPDATE SET
@@ -160,7 +160,7 @@ pub const Sqlite = struct {
 
     fn upsertDialog(ptr: *anyopaque, _: std.Io, _: std.mem.Allocator, row: Store.DialogRow) anyerror!void {
         const self: *Sqlite = @ptrCast(@alignCast(ptr));
-        const stmt = try self.db.prepare(
+        var stmt = try self.db.prepare(
             \\INSERT INTO dialogs (peer_id, top_message_id, unread_count, draft, updated_at)
             \\VALUES (?,?,?,?,?)
             \\ON CONFLICT(peer_id) DO UPDATE SET
@@ -178,7 +178,7 @@ pub const Sqlite = struct {
 
     fn putKv(ptr: *anyopaque, _: std.Io, _: std.mem.Allocator, key: []const u8, value: []const u8) anyerror!void {
         const self: *Sqlite = @ptrCast(@alignCast(ptr));
-        const stmt = try self.db.prepare(
+        var stmt = try self.db.prepare(
             \\INSERT INTO kv_meta (key, value) VALUES (?,?)
             \\ON CONFLICT(key) DO UPDATE SET value=excluded.value;
         );

@@ -3,7 +3,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Connector = @import("Connector.zig");
 const Storage = @import("Storage.zig");
-const Store = @import("Store.zig");
+const Store = @import("store");
 const codec = @import("codec");
 const types = @import("types");
 const unions = @import("unions");
@@ -223,6 +223,7 @@ pub fn Client(comptime handlers: []const Handler) type {
                 .callCdnFn = callCdnImpl,
                 .loginQrFn = loginQrImpl,
                 .file_workers = self.opts.file_workers,
+                .store = self.store,
             };
         }
 

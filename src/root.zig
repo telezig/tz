@@ -14,7 +14,7 @@ pub const RpcError = @import("RpcError.zig");
 pub const handler = client.handler;
 
 pub const Storage = @import("Storage.zig");
-pub const Store = @import("Store.zig");
+pub const Store = @import("store");
 
 pub const DC = Connector.DC;
 pub const default_dcs = Connector.default_dcs;

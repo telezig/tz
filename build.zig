@@ -53,6 +53,13 @@ pub fn build(b: *std.Build) void {
     // --- Core tz module: pure Zig, no sqlite, no libc.
     // Storage/Store backends (e.g. sqlite) are injected at the call site, so
     // consumers who don't need persistence never pull in sqlite3.c.
+    // `store` is the shared Store vtable module (also imported by tz_db).
+    const store_module = b.createModule(.{
+        .root_source_file = b.path("src/Store.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const mod = b.addModule("tz", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -62,6 +69,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "types", .module = types_module },
             .{ .name = "unions", .module = unions_module },
             .{ .name = "functions", .module = functions_module },
+            .{ .name = "store", .module = store_module },
         },
     });
 
@@ -104,11 +112,13 @@ pub fn build(b: *std.Build) void {
 
     // --- Native sqlite backend module (optional; consumers import "tz_db").
     // Used by CLI/desktop builds that want local message history, or by tests.
+    // `store` is wired to the core Store vtable (same file both sides use).
     const db_mod = b.addModule("tz_db", .{
         .root_source_file = b.path("src/db.zig"),
         .target = target,
         .optimize = optimize,
     });
+    db_mod.addImport("store", store_module);
     db_mod.addCSourceFile(.{
         .file = sqlite_dep.path("sqlite3.c"),
         .flags = native_sqlite_flags,
@@ -126,6 +136,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "feature_demo", .extra_imports = &.{} },
         .{ .name = "user_login", .extra_imports = &.{.{ .name = "functions", .module = functions_module }} },
         .{ .name = "qr_login", .extra_imports = &.{} },
+        .{ .name = "bot_store", .extra_imports = &.{.{ .name = "tz_db", .module = db_mod }} },
     };
     for (examples) |ex| {
         const imports = b.allocator.alloc(std.Build.Module.Import, 1 + ex.extra_imports.len) catch @panic("oom");
