@@ -3,6 +3,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Connector = @import("Connector.zig");
 const Storage = @import("Storage.zig");
+const Store = @import("Store.zig");
 const codec = @import("codec");
 const types = @import("types");
 const unions = @import("unions");
@@ -62,6 +63,12 @@ pub const ClientOptions = struct {
     api_id: i32,
     api_hash: []const u8,
     storage: Storage,
+    /// Optional message-history persistence. When set, the client upserts
+    /// incoming/confirmed messages, dialogs and peer entities into it before
+    /// dispatching to handlers. Null (default) keeps core behavior unchanged —
+    /// messages are dispatched but not persisted. `Store` is a vtable, so the
+    /// concrete backend (e.g. `Store.Sqlite`) lives outside core.
+    store: ?Store = null,
     /// Maximum attempts for a single RPC before a transient error (FLOOD_WAIT,
     /// 500 internal, -503 timeout) is given up on and surfaced. Each retry may sleep
     /// — FLOOD_WAIT waits the server-requested seconds — so this bounds the attempt
@@ -90,6 +97,7 @@ pub fn Client(comptime handlers: []const Handler) type {
 
         allocator: Allocator,
         opts: ClientOptions,
+        store: ?Store = null,
         primary: ?*Connector = null,
         closed: bool = false,
         dc_resolved: bool = false,
@@ -123,7 +131,7 @@ pub fn Client(comptime handlers: []const Handler) type {
 
         pub fn init(allocator: Allocator, opts: ClientOptions) !*Self {
             const c = try allocator.create(Self);
-            c.* = .{ .allocator = allocator, .opts = opts };
+            c.* = .{ .allocator = allocator, .opts = opts, .store = opts.store };
             return c;
         }
 
@@ -1025,8 +1033,114 @@ pub fn Client(comptime handlers: []const Handler) type {
             ulog.debug("routeUpdates: in={} applied={} gap={} pts={} qts={}", .{
                 c.updates.len, applied.len, gap, self.state.pts, self.state.qts,
             });
+            if (self.store) |s| self.persistUpdates(io, s, applied, users, chats) catch |e|
+                std.log.warn("store persist: {}", .{e});
             try self.dispatchUpdateSlice(io, arena_alloc, applied, users, chats);
             if (gap) self.sync_event.set(io);
+        }
+
+        /// Persist confirmed-order updates into the configured Store, best-effort.
+        /// Messages are stored as MessageRow; peer entities as PeerRow; dialogs
+        /// are touched on every new message to the peer (top_message_id bump).
+        /// Runs outside mb_mutex (persistUpdates is called after the lock is
+        /// released); the store backend is responsible for its own thread-safety.
+        fn persistUpdates(
+            self: *Self,
+            io: Io,
+            store: Store,
+            updates: []const unions.Update,
+            users: []const unions.User,
+            chats: []const unions.Chat,
+        ) !void {
+            const now: i64 = @intCast(@divTrunc(std.Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s));
+
+            for (users) |u| switch (u) {
+                .User => |user| try store.upsertPeer(io, self.allocator, .{
+                    .id = user.id,
+                    .access_hash = user.access_hash.value orelse 0,
+                    .peer_type = "user",
+                    .username = user.username.value,
+                    .title = user.first_name.value,
+                    .updated_at = now,
+                }),
+                else => {},
+            };
+            for (chats) |ch| switch (ch) {
+                .Channel => |c| try store.upsertPeer(io, self.allocator, .{
+                    .id = c.id,
+                    .access_hash = c.access_hash.value orelse 0,
+                    .peer_type = "channel",
+                    .title = c.title,
+                    .updated_at = now,
+                }),
+                .Chat => |c| try store.upsertPeer(io, self.allocator, .{
+                    .id = c.id,
+                    .access_hash = 0,
+                    .peer_type = "chat",
+                    .title = c.title,
+                    .updated_at = now,
+                }),
+                else => {},
+            };
+
+            for (updates) |u| switch (u) {
+                .UpdateNewMessage => |n| try self.persistMessage(io, store, n.message, now),
+                .UpdateNewChannelMessage => |n| try self.persistMessage(io, store, n.message, now),
+                .UpdateEditMessage => |n| try self.persistMessage(io, store, n.message, now),
+                .UpdateEditChannelMessage => |n| try self.persistMessage(io, store, n.message, now),
+                else => {},
+            };
+        }
+
+        fn peerId(peer: unions.Peer) ?i64 {
+            return switch (peer) {
+                .PeerUser => |p| p.user_id,
+                .PeerChat => |p| p.chat_id,
+                .PeerChannel => |p| p.channel_id,
+            };
+        }
+
+        fn persistMessage(self: *Self, io: Io, store: Store, msg: unions.Message, now: i64) !void {
+            const m = switch (msg) {
+                .Message => |m| m,
+                // Service messages (member joins, etc.) need their own row shape;
+                // skip for now rather than persist a half-formed row.
+                .MessageService, .MessageEmpty => return,
+            };
+            const peer_id = peerId(m.peer_id) orelse return;
+            const from_id: i64 = if (m.from_id.value) |f| peerId(f) orelse 0 else 0;
+
+            // Basic media classification for the media_type column.
+            // Voice/video/sticker/audio are Document subtypes (distinguished by
+            // attributes); a full classifier can refine later.
+            var media_type: ?[]const u8 = null;
+            if (m.media.value) |media| media_type = switch (media) {
+                .MessageMediaPhoto => "photo",
+                .MessageMediaDocument => "document",
+                .MessageMediaGeo => "geo",
+                .MessageMediaContact => "contact",
+                .MessageMediaPoll => "poll",
+                .MessageMediaVenue => "venue",
+                .MessageMediaStory => "story",
+                else => "other",
+            };
+
+            try store.upsertMessage(io, self.allocator, .{
+                .id = m.id,
+                .peer_id = peer_id,
+                .from_id = from_id,
+                .date = m.date,
+                .message = m.message,
+                .out = m.out.value != null,
+                .flags = 0,
+                .media_type = media_type,
+            });
+            try store.upsertDialog(io, self.allocator, .{
+                .peer_id = peer_id,
+                .top_message_id = m.id,
+                .unread_count = 0,
+                .updated_at = now,
+            });
         }
 
         /// Caller must hold mb_mutex.
@@ -1177,4 +1291,67 @@ fn wrapInit(allocator: Allocator, api_id: i32, query_bytes: []const u8) ![]u8 {
     @memcpy(out[0..h.len], h);
     @memcpy(out[h.len..], query_bytes);
     return out;
+}
+
+test "persistUpdates: message lands in store" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    // Minimal Client with no handlers.
+    const C = Client(&.{});
+    var mem_storage = Storage.Memory{};
+    var c = try C.init(aa, .{
+        .api_id = 1,
+        .api_hash = "",
+        .storage = mem_storage.storage(),
+    });
+
+    // In-memory store backend to observe writes.
+    const MemStore = struct {
+        rows: std.ArrayListUnmanaged(Store.MessageRow) = .empty,
+        fn store(self: *@This()) Store {
+            return .{ .ptr = self, .vtable = &vtable };
+        }
+        fn upsertMessage(ptr: *anyopaque, _: Io, gpa: Allocator, row: Store.MessageRow) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            try self.rows.append(gpa, row);
+        }
+        fn queryMessages(_: *anyopaque, _: Io, _: Allocator, _: i64, _: u32) anyerror![]Store.MessageRow {
+            return &.{};
+        }
+        fn upsertPeer(_: *anyopaque, _: Io, _: Allocator, _: Store.PeerRow) anyerror!void {}
+        fn upsertDialog(_: *anyopaque, _: Io, _: Allocator, _: Store.DialogRow) anyerror!void {}
+        fn putKv(_: *anyopaque, _: Io, _: Allocator, _: []const u8, _: []const u8) anyerror!void {}
+        const vtable = Store.VTable{
+            .upsertMessage = upsertMessage,
+            .queryMessages = queryMessages,
+            .upsertPeer = upsertPeer,
+            .upsertDialog = upsertDialog,
+            .putKv = putKv,
+        };
+    };
+    var mem = MemStore{};
+    const store = mem.store();
+
+    const updates = [_]unions.Update{.{ .UpdateNewMessage = .{
+        .message = .{ .Message = .{
+            .id = 42,
+            .peer_id = .{ .PeerUser = .{ .user_id = 777 } },
+            .from_id = .{ .value = .{ .PeerUser = .{ .user_id = 777 } } },
+            .date = 1700000000,
+            .message = "stored via client",
+        } },
+        .pts = 1,
+        .pts_count = 1,
+    } }};
+
+    try c.persistUpdates(std.Io.failing, store, &updates, &.{}, &.{});
+    try testing.expectEqual(@as(usize, 1), mem.rows.items.len);
+    const r = mem.rows.items[0];
+    try testing.expectEqual(@as(i64, 42), r.id);
+    try testing.expectEqual(@as(i64, 777), r.peer_id);
+    try testing.expectEqualStrings("stored via client", r.message);
+    try testing.expectEqual(@as(i64, 1700000000), r.date);
 }
