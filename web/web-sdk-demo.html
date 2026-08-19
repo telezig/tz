@@ -54,6 +54,10 @@
         </select>
         <button id="connect">Connect</button>
       </div>
+      <div class="row" style="margin-top: 0.6rem;">
+        <input type="text" id="bot-token" placeholder="Bot token (leave empty for QR user login)" style="flex:1; min-width: 200px;" />
+        <span class="hint">token set → bot login; empty → QR</span>
+      </div>
       <div id="qr"></div>
       <div class="status" id="status">initializing...</div>
     </div>
@@ -111,6 +115,7 @@
       worker = new Worker('web-sdk-demo-worker.js');
       worker.onmessage = (e) => {
         switch (e.data.type) {
+          case 'log': log(e.data.msg); break;
           case 'ready': status('ready — engine + store loaded. Set API creds and Connect.', 'pass'); break;
           case 'qr':
             qrEl.innerHTML = '<div id="qr-url">' + esc(e.data.url) + '</div>';
@@ -130,8 +135,9 @@
       const apiId = parseInt(document.getElementById('api-id').value) || 611335;
       const apiHash = document.getElementById('api-hash').value || 'd524b414d21f4d37f08684c1df41ac9c';
       const dcUrl = document.getElementById('dc').value;
+      const botToken = document.getElementById('bot-token').value.trim() || null;
       qrEl.innerHTML = '';
-      worker.postMessage({ type: 'connect', dcUrl, apiId, apiHash });
+      worker.postMessage({ type: 'connect', dcUrl, apiId, apiHash, botToken });
     });
 
     document.getElementById('refresh').addEventListener('click', () => {

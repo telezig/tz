@@ -5,6 +5,7 @@ const Transport = @import("../Transport.zig");
 const sha = @import("../crypto/sha.zig");
 const rsa = @import("../crypto/rsa.zig");
 const dh = @import("../crypto/dh.zig");
+const aes_ige = @import("../crypto/aes_ige.zig");
 const ser = @import("codec").serialize;
 const de = @import("codec").deserialize;
 
@@ -35,17 +36,240 @@ pub const Result = struct {
     time_offset: i32,
 };
 
-fn randU64(io: std.Io) u64 {
+/// Sans-I/O DH handshake state machine.
+///
+/// Drives the 4-round key exchange (req_pq_multi → resPQ → req_DH_params →
+/// server_DH_params_ok → set_client_DH_params → dh_gen_ok) with no blocking
+/// I/O: the caller feeds each plain response payload and gets back either the
+/// next request payload to send, or the final Result. Both native (TCP read
+/// loop) and wasm (WebSocket onmessage) drive the exact same state machine.
+///
+/// Plain-message framing (20-byte header + padding) is NOT part of this state
+/// machine — it belongs to the transport. Callers send/receive already-framed
+/// payloads via their transport's plain-message helpers.
+pub const AuthKey = struct {
+    entropy: @import("Session.zig").Entropy,
+
+    stage: Stage = .req_pq,
+
+    nonce: [16]u8 = undefined,
+    server_nonce: [16]u8 = undefined,
+    new_nonce: [32]u8 = undefined,
+    tmp_key: [32]u8 = undefined,
+    tmp_iv: [32]u8 = undefined,
+    dh_prime: [256]u8 = undefined,
+    g_a: [256]u8 = undefined,
+    b_bytes: [256]u8 = undefined,
+    dh_g: u32 = 0,
+    server_time: i32 = 0,
+
+    pub const Stage = enum { req_pq, req_dh, set_client_dh, done };
+
+    pub fn init(entropy: @import("Session.zig").Entropy) AuthKey {
+        return .{ .entropy = entropy };
+    }
+
+    fn rand(self: *AuthKey, buf: []u8) void {
+        self.entropy.random(buf);
+    }
+
+    /// Round 1: build the req_pq_multi request. Caller sends it. The server's
+    /// resPQ response is then fed to `step`.
+    pub fn start(self: *AuthKey, buf: []u8) ![]u8 {
+        self.rand(&self.nonce);
+        var w: std.Io.Writer = .fixed(buf);
+        try w.writeInt(u32, 0xbe7e8ef1, .little); // req_pq_multi
+        try w.writeAll(&self.nonce);
+        return w.buffered();
+    }
+
+    /// Feed one plain response payload, advance the state machine. Returns
+    /// either the next request payload to send (caller frames + sends it), or
+    /// the completed handshake result. `buf` is scratch for the output; the
+    /// returned slice borrows it.
+    pub fn step(self: *AuthKey, response: []const u8, allocator: Allocator, buf: []u8) !StepResult {
+        return switch (self.stage) {
+            .req_pq => self.stepResPq(response, allocator, buf),
+            .req_dh => self.stepServerDh(response, allocator, buf),
+            .set_client_dh => self.stepDhGen(response),
+            .done => error.AlreadyDone,
+        };
+    }
+
+    pub const StepResult = union(enum) {
+        send: []u8, // borrows buf
+        done: Result,
+    };
+
+    fn stepResPq(self: *AuthKey, response: []const u8, allocator: Allocator, buf: []u8) !StepResult {
+        var r: std.Io.Reader = .fixed(response);
+        const ctor_id = try r.takeInt(u32, .little);
+        if (ctor_id != 0x05162463) return error.UnexpectedResponse;
+        var nonce_echo: [16]u8 = undefined;
+        try r.readSliceAll(&nonce_echo);
+        try r.readSliceAll(&self.server_nonce);
+        const pq_bytes = try de.bytes(&r, allocator);
+        defer allocator.free(pq_bytes);
+        var pq: u64 = 0;
+        for (pq_bytes) |b| pq = pq * 256 + b;
+
+        const factors = factorPQ(pq, self.entropy);
+
+        var p_bytes: [4]u8 = undefined;
+        var q_bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &p_bytes, factors.p, .big);
+        std.mem.writeInt(u32, &q_bytes, factors.q, .big);
+        self.rand(&self.new_nonce);
+
+        var inner_buf: [256]u8 = undefined;
+        var iw: std.Io.Writer = .fixed(&inner_buf);
+        try iw.writeInt(u32, 0x83c95aec, .little); // p_q_inner_data_dc
+        try ser.bytes(&iw, pq_bytes);
+        try ser.bytes(&iw, &p_bytes);
+        try ser.bytes(&iw, &q_bytes);
+        try iw.writeAll(&self.nonce);
+        try iw.writeAll(&self.server_nonce);
+        try iw.writeAll(&self.new_nonce);
+
+        const inner_data = iw.buffered();
+        const inner_hash = sha.sha1(inner_data);
+        var rsa_payload: [255]u8 = undefined;
+        @memcpy(rsa_payload[0..20], &inner_hash);
+        const copy_len = @min(inner_data.len, 235);
+        @memcpy(rsa_payload[20..][0..copy_len], inner_data[0..copy_len]);
+        self.rand(rsa_payload[20 + copy_len ..]);
+
+        var encrypted_data: [256]u8 = undefined;
+        try rsa.rsaEncrypt(&encrypted_data, &rsa_payload, serverKeyN[0..256], allocator);
+
+        var w2: std.Io.Writer = .fixed(buf);
+        try w2.writeInt(u32, 0xd712e4be, .little); // req_DH_params
+        try w2.writeAll(&self.nonce);
+        try w2.writeAll(&self.server_nonce);
+        try ser.bytes(&w2, &p_bytes);
+        try ser.bytes(&w2, &q_bytes);
+        try w2.writeInt(i64, serverKeyFp, .little);
+        try ser.bytes(&w2, &encrypted_data);
+
+        self.stage = .req_dh;
+        return .{ .send = w2.buffered() };
+    }
+
+    fn stepServerDh(self: *AuthKey, response: []const u8, allocator: Allocator, buf: []u8) !StepResult {
+        var dhr: std.Io.Reader = .fixed(response);
+        const dh_id = try dhr.takeInt(u32, .little);
+        if (dh_id != 0xd0e8075c) return error.DhParamsFailed;
+        var skip16: [16]u8 = undefined;
+        try dhr.readSliceAll(&skip16);
+        try dhr.readSliceAll(&skip16);
+        const enc_answer = try de.bytes(&dhr, allocator);
+        defer allocator.free(enc_answer);
+
+        // Decrypt server_DH_inner_data
+        const sha1_ns = sha.sha1Cat(&.{ &self.new_nonce, &self.server_nonce });
+        const sha1_sn = sha.sha1Cat(&.{ &self.server_nonce, &self.new_nonce });
+        const sha1_nn = sha.sha1Cat(&.{ &self.new_nonce, &self.new_nonce });
+        @memcpy(self.tmp_key[0..20], &sha1_ns);
+        @memcpy(self.tmp_key[20..32], sha1_sn[0..12]);
+        @memcpy(self.tmp_iv[0..8], sha1_sn[12..20]);
+        @memcpy(self.tmp_iv[8..28], &sha1_nn);
+        @memcpy(self.tmp_iv[28..32], self.new_nonce[0..4]);
+
+        const answer_buf = try allocator.dupe(u8, enc_answer);
+        defer allocator.free(answer_buf);
+        aes_ige.decrypt(self.tmp_key, self.tmp_iv, answer_buf);
+
+        var ansr: std.Io.Reader = .fixed(answer_buf[20..]);
+        const inner_id = try ansr.takeInt(u32, .little);
+        if (inner_id != 0xb5890dba) return error.BadInnerData;
+        try ansr.discardAll(16);
+        try ansr.discardAll(16);
+        const dh_g = try ansr.takeInt(u32, .little);
+        const dh_prime_bytes = try de.bytes(&ansr, allocator);
+        defer allocator.free(dh_prime_bytes);
+        const g_a_bytes = try de.bytes(&ansr, allocator);
+        defer allocator.free(g_a_bytes);
+        const server_time = try ansr.takeInt(i32, .little);
+        self.dh_g = dh_g;
+        self.server_time = server_time;
+
+        @memset(&self.dh_prime, 0);
+        @memset(&self.g_a, 0);
+        if (dh_prime_bytes.len <= 256) @memcpy(self.dh_prime[256 - dh_prime_bytes.len ..], dh_prime_bytes);
+        if (g_a_bytes.len <= 256) @memcpy(self.g_a[256 - g_a_bytes.len ..], g_a_bytes);
+        self.rand(&self.b_bytes);
+        const dh_result = try dh.compute(.{ .dh_prime = self.dh_prime, .g = dh_g }, &self.g_a, &self.b_bytes, allocator);
+        self.dh_prime = dh_result.secret; // stash shared secret for dh_gen
+
+        var ci_data_buf: [320]u8 = undefined;
+        var ciw: std.Io.Writer = .fixed(&ci_data_buf);
+        try ciw.writeInt(u32, 0x6643b654, .little); // client_DH_inner_data
+        try ciw.writeAll(&self.nonce);
+        try ciw.writeAll(&self.server_nonce);
+        try ciw.writeInt(i64, 0, .little);
+        try ser.bytes(&ciw, &dh_result.g_b);
+        const ci_data = ciw.buffered();
+        const ci_hash = sha.sha1(ci_data);
+
+        const ci_total = 20 + ci_data.len;
+        const ci_padded_len = ((ci_total + 15) / 16) * 16;
+        std.debug.assert(ci_padded_len <= 352);
+        var ci_padded_buf: [352]u8 = undefined;
+        const ci_padded = ci_padded_buf[0..ci_padded_len];
+        @memcpy(ci_padded[0..20], &ci_hash);
+        @memcpy(ci_padded[20..][0..ci_data.len], ci_data);
+        self.rand(ci_padded[20 + ci_data.len ..]);
+        aes_ige.encrypt(self.tmp_key, self.tmp_iv, ci_padded);
+
+        var sw: std.Io.Writer = .fixed(buf);
+        try sw.writeInt(u32, 0xf5045f1f, .little); // set_client_DH_params
+        try sw.writeAll(&self.nonce);
+        try sw.writeAll(&self.server_nonce);
+        try ser.bytes(&sw, ci_padded);
+
+        self.stage = .set_client_dh;
+        return .{ .send = sw.buffered() };
+    }
+
+    fn stepDhGen(self: *AuthKey, response: []const u8) !StepResult {
+        if (response.len < 4) return error.TooShort;
+        const gen_id = std.mem.readInt(u32, response[0..4], .little);
+        if (gen_id != 0x3bcbf734) return error.DhGenFailed;
+
+        const auth_key_hash = sha.sha1(&self.dh_prime);
+        // SAFETY: immediately overwritten by memcpy from auth_key_hash slice
+        var auth_key_id: i64 = undefined;
+        @memcpy(std.mem.asBytes(&auth_key_id), auth_key_hash[12..20]);
+
+        // SAFETY: every byte is written by the XOR loop below
+        var server_salt: i64 = undefined;
+        for (std.mem.asBytes(&server_salt), self.new_nonce[0..8], self.server_nonce[0..8]) |*o, a, b| o.* = a ^ b;
+
+        self.stage = .done;
+        return .{ .done = Result{
+            .auth_key = self.dh_prime,
+            .auth_key_id = auth_key_id,
+            .server_salt = server_salt,
+            .time_offset = blk: {
+                const now_ms = self.entropy.nowMs();
+                const now_s: i32 = @intCast(@divTrunc(now_ms, std.time.ms_per_s));
+                break :blk self.server_time - now_s;
+            },
+        } };
+    }
+};
+
+fn randU64(entropy: @import("Session.zig").Entropy) u64 {
     var buf: [8]u8 = undefined;
-    io.random(&buf);
+    entropy.random(&buf);
     return @bitCast(buf);
 }
 
-fn factorPQ(pq: u64, io: std.Io) struct { p: u32, q: u32 } {
+fn factorPQ(pq: u64, entropy: @import("Session.zig").Entropy) struct { p: u32, q: u32 } {
     if (pq % 2 == 0) return .{ .p = 2, .q = @intCast(pq / 2) };
-    var x: u64 = randU64(io) % (pq - 2) + 2;
+    var x: u64 = randU64(entropy) % (pq - 2) + 2;
     var y = x;
-    const c: u64 = randU64(io) % (pq - 1) + 1;
+    const c: u64 = randU64(entropy) % (pq - 1) + 1;
     var d: u64 = 1;
     while (d == 1) {
         x = @intCast((@as(u128, x) * @as(u128, x) + @as(u128, c)) % @as(u128, pq));
@@ -53,7 +277,7 @@ fn factorPQ(pq: u64, io: std.Io) struct { p: u32, q: u32 } {
         y = @intCast((@as(u128, y) * @as(u128, y) + @as(u128, c)) % @as(u128, pq));
         d = gcd(if (x > y) x - y else y - x, pq);
     }
-    if (d == pq) return factorPQ(pq, io);
+    if (d == pq) return factorPQ(pq, entropy);
     const p: u32 = @intCast(d);
     const q: u32 = @intCast(pq / d);
     return if (p < q) .{ .p = p, .q = q } else .{ .p = q, .q = p };
@@ -69,6 +293,12 @@ fn gcd(a: u64, b: u64) u64 {
     }
     return x;
 }
+
+// --- Blocking convenience wrapper (native path) ---
+// Drives the AuthKey state machine over a Transport: sends each request via
+// plain framing, reads each response, feeds it to step(). Kept so native
+// Connector and any blocking caller get the same behavior as before; the
+// state machine itself is the shared, testable core.
 
 fn readPlainMsg(transport: *Transport, io: Io, allocator: Allocator) ![]u8 {
     const frame = try transport.readFrame(io, allocator);
@@ -100,178 +330,63 @@ fn writePlainMsg(transport: *Transport, io: Io, payload: []const u8) !void {
 }
 
 pub fn perform(transport: *Transport, io: Io, allocator: Allocator) !Result {
-    // Step 1: req_pq_multi
-    var nonce: [16]u8 = undefined;
-    io.random(&nonce);
+    var ak = AuthKey.init(@import("Session.zig").ioEntropy(io));
 
-    var req_buf: [128]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&req_buf);
-    try w.writeInt(u32, 0xbe7e8ef1, .little);
-    try w.writeAll(&nonce);
-    try writePlainMsg(transport, io, w.buffered());
+    // Round 1: send req_pq_multi
+    var buf: [512]u8 = undefined;
+    const req = try ak.start(&buf);
+    try writePlainMsg(transport, io, req);
 
-    // Step 2: resPQ
-    const res_pq_raw = try readPlainMsg(transport, io, allocator);
-    defer allocator.free(res_pq_raw);
-    var r: std.Io.Reader = .fixed(res_pq_raw);
-    const ctor_id = try r.takeInt(u32, .little);
-    if (ctor_id != 0x05162463) return error.UnexpectedResponse;
-    var nonce_echo: [16]u8 = undefined;
-    try r.readSliceAll(&nonce_echo);
-    var server_nonce: [16]u8 = undefined;
-    try r.readSliceAll(&server_nonce);
-    const pq_bytes = try de.bytes(&r, allocator);
-    defer allocator.free(pq_bytes);
-    var pq: u64 = 0;
-    for (pq_bytes) |b| pq = pq * 256 + b;
+    // Feed each response, send each request, until done.
+    while (true) {
+        const resp = try readPlainMsg(transport, io, allocator);
+        defer allocator.free(resp);
+        switch (try ak.step(resp, allocator, &buf)) {
+            .send => |next| try writePlainMsg(transport, io, next),
+            .done => |result| return result,
+        }
+    }
+}
 
-    // Step 3: factor pq
-    const factors = factorPQ(pq, io);
+test "AuthKey state machine: start builds req_pq_multi" {
+    var ak = AuthKey.init(@import("Session.zig").Entropy{ .js = .{
+        .random = struct {
+            fn f(buf: []u8) void {
+                @memset(buf, 0x42);
+            }
+        }.f,
+        .now_ms = struct {
+            fn f() i64 {
+                return 1700000000000;
+            }
+        }.f,
+    } });
+    var buf: [512]u8 = undefined;
+    const req = try ak.start(&buf);
+    try std.testing.expectEqual(@as(u32, 0xbe7e8ef1), std.mem.readInt(u32, req[0..4], .little));
+    // nonce follows
+    try std.testing.expectEqual(@as(usize, 20), req.len);
+    try std.testing.expectEqual(@as(u8, 0x42), req[4]);
+    // stage advanced
+    try std.testing.expectEqual(AuthKey.Stage.req_pq, ak.stage);
+}
 
-    // Step 4: p_q_inner_data_dc
-    var p_bytes: [4]u8 = undefined;
-    var q_bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &p_bytes, factors.p, .big);
-    std.mem.writeInt(u32, &q_bytes, factors.q, .big);
-    var new_nonce: [32]u8 = undefined;
-    io.random(&new_nonce);
-
-    var inner_buf: [256]u8 = undefined;
-    var iw: std.Io.Writer = .fixed(&inner_buf);
-    try iw.writeInt(u32, 0x83c95aec, .little);
-    try ser.bytes(&iw, pq_bytes);
-    try ser.bytes(&iw, &p_bytes);
-    try ser.bytes(&iw, &q_bytes);
-    try iw.writeAll(&nonce);
-    try iw.writeAll(&server_nonce);
-    try iw.writeAll(&new_nonce);
-
-    const inner_data = iw.buffered();
-    const inner_hash = sha.sha1(inner_data);
-    var rsa_payload: [255]u8 = undefined;
-    @memcpy(rsa_payload[0..20], &inner_hash);
-    const copy_len = @min(inner_data.len, 235);
-    @memcpy(rsa_payload[20..][0..copy_len], inner_data[0..copy_len]);
-    io.random(rsa_payload[20 + copy_len ..]);
-
-    var encrypted_data: [256]u8 = undefined;
-    try rsa.rsaEncrypt(&encrypted_data, &rsa_payload, serverKeyN[0..256], allocator);
-
-    // Step 5: req_DH_params
-    var req2_buf: [512]u8 = undefined;
-    var w2: std.Io.Writer = .fixed(&req2_buf);
-    try w2.writeInt(u32, 0xd712e4be, .little);
-    try w2.writeAll(&nonce);
-    try w2.writeAll(&server_nonce);
-    try ser.bytes(&w2, &p_bytes);
-    try ser.bytes(&w2, &q_bytes);
-    try w2.writeInt(i64, serverKeyFp, .little);
-    try ser.bytes(&w2, &encrypted_data);
-    try writePlainMsg(transport, io, w2.buffered());
-
-    // Step 6: server_DH_params_ok
-    const dh_params_raw = try readPlainMsg(transport, io, allocator);
-    defer allocator.free(dh_params_raw);
-    var dhr: std.Io.Reader = .fixed(dh_params_raw);
-    const dh_id = try dhr.takeInt(u32, .little);
-    if (dh_id != 0xd0e8075c) return error.DhParamsFailed;
-    var skip16: [16]u8 = undefined;
-    try dhr.readSliceAll(&skip16);
-    try dhr.readSliceAll(&skip16);
-    const enc_answer = try de.bytes(&dhr, allocator);
-    defer allocator.free(enc_answer);
-
-    // Decrypt server_DH_inner_data
-    const sha1_ns = sha.sha1Cat(&.{ &new_nonce, &server_nonce });
-    const sha1_sn = sha.sha1Cat(&.{ &server_nonce, &new_nonce });
-    const sha1_nn = sha.sha1Cat(&.{ &new_nonce, &new_nonce });
-    var tmp_key: [32]u8 = undefined;
-    var tmp_iv: [32]u8 = undefined;
-    @memcpy(tmp_key[0..20], &sha1_ns);
-    @memcpy(tmp_key[20..32], sha1_sn[0..12]);
-    @memcpy(tmp_iv[0..8], sha1_sn[12..20]);
-    @memcpy(tmp_iv[8..28], &sha1_nn);
-    @memcpy(tmp_iv[28..32], new_nonce[0..4]);
-
-    const answer_buf = try allocator.dupe(u8, enc_answer);
-    defer allocator.free(answer_buf);
-    @import("../crypto/aes_ige.zig").decrypt(tmp_key, tmp_iv, answer_buf);
-
-    var ansr: std.Io.Reader = .fixed(answer_buf[20..]);
-    const inner_id = try ansr.takeInt(u32, .little);
-    if (inner_id != 0xb5890dba) return error.BadInnerData;
-    try ansr.discardAll(16);
-    try ansr.discardAll(16);
-    const dh_g = try ansr.takeInt(u32, .little);
-    const dh_prime_bytes = try de.bytes(&ansr, allocator);
-    defer allocator.free(dh_prime_bytes);
-    const g_a_bytes = try de.bytes(&ansr, allocator);
-    defer allocator.free(g_a_bytes);
-    const server_time = try ansr.takeInt(i32, .little);
-
-    // Step 7: compute g_b and shared secret
-    var dh_prime: [256]u8 = undefined;
-    var g_a: [256]u8 = undefined;
-    @memset(&dh_prime, 0);
-    @memset(&g_a, 0);
-    if (dh_prime_bytes.len <= 256) @memcpy(dh_prime[256 - dh_prime_bytes.len ..], dh_prime_bytes);
-    if (g_a_bytes.len <= 256) @memcpy(g_a[256 - g_a_bytes.len ..], g_a_bytes);
-    var b_bytes: [256]u8 = undefined;
-    io.random(&b_bytes);
-    const dh_result = try dh.compute(.{ .dh_prime = dh_prime, .g = dh_g }, &g_a, &b_bytes, allocator);
-
-    // Step 8: set_client_DH_params
-    var ci_data_buf: [320]u8 = undefined;
-    var ciw: std.Io.Writer = .fixed(&ci_data_buf);
-    try ciw.writeInt(u32, 0x6643b654, .little);
-    try ciw.writeAll(&nonce);
-    try ciw.writeAll(&server_nonce);
-    try ciw.writeInt(i64, 0, .little);
-    try ser.bytes(&ciw, &dh_result.g_b);
-    const ci_data = ciw.buffered();
-    const ci_hash = sha.sha1(ci_data);
-
-    const ci_total = 20 + ci_data.len;
-    const ci_padded_len = ((ci_total + 15) / 16) * 16;
-    std.debug.assert(ci_padded_len <= 352);
-    var ci_padded_buf: [352]u8 = undefined;
-    const ci_padded = ci_padded_buf[0..ci_padded_len];
-    @memcpy(ci_padded[0..20], &ci_hash);
-    @memcpy(ci_padded[20..][0..ci_data.len], ci_data);
-    io.random(ci_padded[20 + ci_data.len ..]);
-    @import("../crypto/aes_ige.zig").encrypt(tmp_key, tmp_iv, ci_padded);
-
-    var set_buf: [512]u8 = undefined;
-    var sw: std.Io.Writer = .fixed(&set_buf);
-    try sw.writeInt(u32, 0xf5045f1f, .little);
-    try sw.writeAll(&nonce);
-    try sw.writeAll(&server_nonce);
-    try ser.bytes(&sw, ci_padded);
-    try writePlainMsg(transport, io, sw.buffered());
-
-    // Step 9: dh_gen_ok
-    const dh_gen_raw = try readPlainMsg(transport, io, allocator);
-    defer allocator.free(dh_gen_raw);
-    if (dh_gen_raw.len < 4) return error.TooShort;
-    const gen_id = std.mem.readInt(u32, dh_gen_raw[0..4], .little);
-    if (gen_id != 0x3bcbf734) return error.DhGenFailed;
-
-    const auth_key_hash = sha.sha1(&dh_result.secret);
-    // SAFETY: immediately overwritten by memcpy from auth_key_hash slice
-    var auth_key_id: i64 = undefined;
-    @memcpy(std.mem.asBytes(&auth_key_id), auth_key_hash[12..20]);
-
-    // SAFETY: every byte is written by the XOR loop below
-    var server_salt: i64 = undefined;
-    for (std.mem.asBytes(&server_salt), new_nonce[0..8], server_nonce[0..8]) |*o, a, b| o.* = a ^ b;
-
-    return Result{
-        .auth_key = dh_result.secret,
-        .auth_key_id = auth_key_id,
-        .server_salt = server_salt,
-        .time_offset = blk: {
-            const now_s: i32 = @intCast(@divTrunc(std.Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s));
-            break :blk server_time - now_s;
-        },
-    };
+test "AuthKey state machine: resPQ rejected for wrong ctor" {
+    var ak = AuthKey.init(@import("Session.zig").Entropy{ .js = .{
+        .random = struct {
+            fn f(buf: []u8) void {
+                @memset(buf, 0x11);
+            }
+        }.f,
+        .now_ms = struct {
+            fn f() i64 {
+                return 0;
+            }
+        }.f,
+    } });
+    var buf: [512]u8 = undefined;
+    _ = try ak.start(&buf);
+    // wrong ctor id
+    const bad = [_]u8{ 0x01, 0x00, 0x00, 0x00 } ** 4;
+    try std.testing.expectError(error.UnexpectedResponse, ak.step(&bad, std.testing.allocator, &buf));
 }

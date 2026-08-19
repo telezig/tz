@@ -59,8 +59,11 @@ Before executing broad refactors, validate the riskiest architectural boundaries
 - [x] **POC 2: Sans-I/O MTProto Engine & Unified Session**
   - **Objective**: Merge `src/mtproto/Session.zig` and `src/wasm.zig` into a single I/O-agnostic `Session` state machine.
   - **Verification**: Run unit tests where both simulated TCP streams and WebSocket buffers drive the exact same session instance without any platform code duplication.
-  - **Result**: `mtproto/Session.zig` is now fully platform-agnostic via an injected `Entropy` union (`.io` = std.Io handle by value; `.js` = Web Crypto + Date.now fn pointers). The duplicate `WasmSession` in `src/wasm.zig` is deleted; the wasm QR-login demo drives the exact same `Session` state machine with a 3-line `.js` entropy binding. ✅
-  - **Bonus**: deleting the duplicated crypto state machine shrank the MTProto wasm from 1.09MB to **94KB raw / 34KB gzip** (core <150KB gzip target hit).
+  - **Result**: 
+    - `mtproto/Session.zig` (encryption state machine) fully platform-agnostic via injected `Entropy` union (`.io` / `.js`); duplicate `WasmSession` deleted. ✅
+    - **`auth_key.perform()` decomposed into a Sans-I/O `AuthKey` state machine** (`start`/`step`, no blocking I/O). Native drives it over TCP frames via a thin `perform()` wrapper; wasm feeds it WebSocket payloads — **one handshake implementation for both platforms**. ✅
+    - wasm.zig hand-written handshake (factorPQ/RSA/DH/state machine, ~300 lines) deleted; it now just bridges WebSocket frames in/out. ✅
+  - **Bonus**: deleting duplicated protocol code shrank the MTProto wasm from 1.09MB to **~130KB gzip**; core <150KB gzip target met.
 - [ ] **POC 3: TL Schema to TypeScript Type Definition Codegen**
   - **Objective**: Extend `codegen/main.zig` to emit a comprehensive `tl.d.ts` alongside Zig code.
   - **Verification**: Import generated types in TypeScript to verify autocompletion for constructor unions, functions, and flags.

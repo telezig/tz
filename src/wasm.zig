@@ -1,10 +1,7 @@
 const std = @import("std");
 const tz = @import("tz");
-const sha = tz.crypto.sha;
-const rsa = tz.crypto.rsa;
-const dh = tz.crypto.dh;
-const aes_ige = tz.crypto.aes_ige;
 const Session = tz.Session;
+const AuthKey = tz.auth_key.AuthKey;
 const WsTransport = tz.ws.WsTransport;
 const codec = @import("codec");
 const types = @import("types");
@@ -26,6 +23,12 @@ extern fn js_now_ms_part() u32;
 /// host can store it (e.g. into the OPFS sqlite store). ptr/len reference the
 /// UTF-8 message text in wasm memory.
 extern fn js_on_message(peer_id: i64, from_id: i64, date: i32, msg_id: i64, out: bool, text_ptr: [*]const u8, text_len: usize) void;
+/// DC migration: the host should reconnect to the WebSocket endpoint for this
+/// dc_id (auth key is per-DC, so a fresh DH handshake happens automatically).
+extern fn js_on_migrate(dc_id: u8) void;
+/// Auth key established — host should persist the session (exported via
+/// tz_export_session) so a future page load can skip the DH handshake.
+extern fn js_on_session_ready() void;
 
 fn log(msg: []const u8) void {
     js_log(msg.ptr, msg.len);
@@ -70,69 +73,13 @@ const wasm_entropy = Session.Entropy{ .js = .{
         }
     }.f,
 } };
-
-// Telegram Server RSA Public Key (Standard Telegram DC Key)
-const serverKeyN: [256]u8 = .{
-    0xc1, 0x50, 0x02, 0x3e, 0x2f, 0x70, 0xdb, 0x79, 0x85, 0xde, 0xd0, 0x64, 0x75, 0x9c, 0xfe, 0xcf,
-    0x0a, 0xf3, 0x28, 0xe6, 0x9a, 0x41, 0xda, 0xf4, 0xd6, 0xf0, 0x1b, 0x53, 0x81, 0x35, 0xa6, 0xf9,
-    0x1f, 0x8f, 0x8b, 0x2a, 0x0e, 0xc9, 0xba, 0x97, 0x20, 0xce, 0x35, 0x2e, 0xfc, 0xf6, 0xc5, 0x68,
-    0x0f, 0xfc, 0x42, 0x4b, 0xd6, 0x34, 0x86, 0x49, 0x02, 0xde, 0x0b, 0x4b, 0xd6, 0xd4, 0x9f, 0x4e,
-    0x58, 0x02, 0x30, 0xe3, 0xae, 0x97, 0xd9, 0x5c, 0x8b, 0x19, 0x44, 0x2b, 0x3c, 0x0a, 0x10, 0xd8,
-    0xf5, 0x63, 0x3f, 0xec, 0xed, 0xd6, 0x92, 0x6a, 0x7f, 0x6d, 0xab, 0x0d, 0xdb, 0x7d, 0x45, 0x7f,
-    0x9e, 0xa8, 0x1b, 0x84, 0x65, 0xfc, 0xd6, 0xff, 0xfe, 0xed, 0x11, 0x40, 0x11, 0xdf, 0x91, 0xc0,
-    0x59, 0xca, 0xed, 0xaf, 0x97, 0x62, 0x5f, 0x6c, 0x96, 0xec, 0xc7, 0x47, 0x25, 0x55, 0x69, 0x34,
-    0xef, 0x78, 0x1d, 0x86, 0x6b, 0x34, 0xf0, 0x11, 0xfc, 0xe4, 0xd8, 0x35, 0xa0, 0x90, 0x19, 0x6e,
-    0x9a, 0x5f, 0x0e, 0x44, 0x49, 0xaf, 0x7e, 0xb6, 0x97, 0xdd, 0xb9, 0x07, 0x64, 0x94, 0xca, 0x5f,
-    0x81, 0x10, 0x4a, 0x30, 0x5b, 0x6d, 0xd2, 0x76, 0x65, 0x72, 0x2c, 0x46, 0xb6, 0x0e, 0x5d, 0xf6,
-    0x80, 0xfb, 0x16, 0xb2, 0x10, 0x60, 0x7e, 0xf2, 0x17, 0x65, 0x2e, 0x60, 0x23, 0x6c, 0x25, 0x5f,
-    0x6a, 0x28, 0x31, 0x5f, 0x40, 0x83, 0xa9, 0x67, 0x91, 0xd7, 0x21, 0x4b, 0xf6, 0x4c, 0x1d, 0xf4,
-    0xfd, 0x0d, 0xb1, 0x94, 0x4f, 0xb2, 0x6a, 0x2a, 0x57, 0x03, 0x1b, 0x32, 0xee, 0xe6, 0x4a, 0xd1,
-    0x5a, 0x8b, 0xa6, 0x88, 0x85, 0xcd, 0xe7, 0x4a, 0x5b, 0xfc, 0x92, 0x0f, 0x6a, 0xbf, 0x59, 0xba,
-    0x5c, 0x75, 0x50, 0x63, 0x73, 0xe7, 0x13, 0x0f, 0x90, 0x42, 0xda, 0x92, 0x21, 0x79, 0x25, 0x1f,
-};
-const serverKeyFp: i64 = -4344800451088585951;
-
-// GCD & Pollard's rho for factorPQ
-fn gcd(a: u64, b: u64) u64 {
-    var x = a;
-    var y = b;
-    while (y != 0) {
-        const t = y;
-        y = x % y;
-        x = t;
-    }
-    return x;
-}
-
-fn randU64() u64 {
-    var buf: [8]u8 = undefined;
-    fillRandom(&buf);
-    return @bitCast(buf);
-}
-
-fn factorPQ(pq: u64) struct { p: u32, q: u32 } {
-    if (pq % 2 == 0) return .{ .p = 2, .q = @intCast(pq / 2) };
-    var x: u64 = randU64() % (pq - 2) + 2;
-    var y = x;
-    const c: u64 = randU64() % (pq - 1) + 1;
-    var d: u64 = 1;
-    while (d == 1) {
-        x = @intCast((@as(u128, x) * @as(u128, x) + @as(u128, c)) % @as(u128, pq));
-        y = @intCast((@as(u128, y) * @as(u128, y) + @as(u128, c)) % @as(u128, pq));
-        y = @intCast((@as(u128, y) * @as(u128, y) + @as(u128, c)) % @as(u128, pq));
-        d = gcd(if (x > y) x - y else y - x, pq);
-    }
-    if (d == pq) return factorPQ(pq);
-    const p: u32 = @intCast(d);
-    const q: u32 = @intCast(pq / d);
-    return if (p < q) .{ .p = p, .q = q } else .{ .p = q, .q = p };
-}
-
 // Global Transport
 var ws_transport = WsTransport.init(allocator, .obfuscated2_intermediate);
 var current_dc_id: i16 = 2;
 var last_plain_msg_id: i64 = 0;
 
+// Sans-I/O DH handshake state machine (shared with native auth_key).
+var ak: AuthKey = undefined;
 fn generateMsgId(sec: i64, ms_part: u32, last_id: *i64) i64 {
     const nano: u64 = @as(u64, ms_part) * 1_000_000;
     const lower: u64 = ((nano << 32) / 1_000_000_000) & ~@as(u64, 3);
@@ -210,9 +157,6 @@ fn sendEncryptedMsg(ciphertext: []const u8) !void {
 // Global Client State
 const Stage = enum {
     idle,
-    req_pq_sent,
-    req_dh_sent,
-    set_client_dh_sent,
     ready,
 };
 
@@ -220,12 +164,8 @@ var stage: Stage = .idle;
 var api_id: i32 = 0;
 var api_hash_buf: [64]u8 = undefined;
 var api_hash_len: usize = 0;
-
-var nonce: [16]u8 = undefined;
-var server_nonce: [16]u8 = undefined;
-var new_nonce: [32]u8 = undefined;
-var tmp_key: [32]u8 = undefined;
-var tmp_iv: [32]u8 = undefined;
+var bot_token_buf: [128]u8 = undefined;
+var bot_token_len: usize = 0;
 
 var session: ?Session = null;
 
@@ -239,10 +179,84 @@ export fn tz_init(app_id: i32, hash_ptr: [*]const u8, hash_len: usize) void {
     setStatus("Ready to connect");
 }
 
+export fn tz_set_bot_token(token_ptr: [*]const u8, token_len: usize) void {
+    bot_token_len = @min(token_len, bot_token_buf.len);
+    @memcpy(bot_token_buf[0..bot_token_len], token_ptr[0..bot_token_len]);
+}
+
+/// Reset all per-DC state (session/auth key, stage, transport) so a fresh
+/// handshake can run — used on DC migration where the auth key is re-derived.
+export fn tz_reset() void {
+    if (session) |*s| s.deinit(allocator);
+    session = null;
+    stage = .idle;
+    current_dc_id = 2;
+    ws_transport.reset(fillRandom, current_dc_id);
+}
+
+// Session persistence. Layout mirrors native Storage.SessionData so the same
+// blob could be shared across platforms. auth_key/auth_key_id/server_salt are
+// the durable state; session_id/seq_no are per-connection and re-derived.
+const SessionData = extern struct {
+    auth_key: [256]u8,
+    auth_key_id: i64,
+    server_salt: i64,
+    dc_id: u8,
+    is_home: bool = false,
+    _pad: [6]u8 = .{0} ** 6,
+};
+
+/// Serialize the current session into `buf`. Returns bytes written, or 0 if no
+/// session (yet). The host persists this (e.g. IndexedDB) keyed by dc.
+export fn tz_export_session(buf: [*]u8, buf_len: usize) usize {
+    const s = session orelse return 0;
+    if (buf_len < @sizeOf(SessionData)) return 0;
+    var data = SessionData{
+        .auth_key = s.auth_key,
+        .auth_key_id = s.auth_key_id,
+        .server_salt = s.server_salt,
+        .dc_id = @intCast(@abs(@as(i16, current_dc_id))),
+    };
+    @memcpy(buf[0..@sizeOf(SessionData)], std.mem.asBytes(&data));
+    return @sizeOf(SessionData);
+}
+
+/// Restore a previously persisted session. On success the connection can skip
+/// the DH handshake (caller must still send auth/init). Returns 1 on success,
+/// 0 if the blob is invalid or absent.
+export fn tz_import_session(buf: [*]const u8, buf_len: usize) i32 {
+    if (buf_len < @sizeOf(SessionData)) return 0;
+    const data: *const SessionData = @ptrCast(@alignCast(buf));
+    if (data.auth_key_id == 0) return 0;
+
+    if (session) |*s| s.deinit(allocator);
+    session = Session.init(data.auth_key, data.auth_key_id, data.server_salt, wasm_entropy);
+    stage = .ready;
+    log("session restored from persistence");
+    setStatus("Session restored, skipping DH handshake");
+    return 1;
+}
+
 export fn tz_ws_open() void {
     ws_transport.reset(fillRandom, current_dc_id);
     if (ws_transport.getInitFrame()) |init_frame| {
         js_ws_send(init_frame.ptr, init_frame.len);
+    }
+    // Session restored from persistence: skip DH, go straight to auth.
+    if (stage == .ready and session != null) {
+        setStatus("WebSocket opened, session active — authenticating...");
+        if (bot_token_len > 0) {
+            authWithBotToken() catch {
+                log("bot auth failed");
+                setStatus("bot auth failed");
+            };
+        } else {
+            exportLoginQr() catch {
+                log("exportLoginQr failed");
+                setStatus("login token export failed");
+            };
+        }
+        return;
     }
     setStatus("WebSocket opened, starting Obfuscated2 DH key exchange...");
     startDhHandshake() catch {
@@ -252,14 +266,10 @@ export fn tz_ws_open() void {
 }
 
 fn startDhHandshake() !void {
-    fillRandom(&nonce);
+    ak = AuthKey.init(wasm_entropy);
     var req_buf: [128]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&req_buf);
-    try w.writeInt(u32, 0xbe7e8ef1, .little); // req_pq_multi
-    try w.writeAll(&nonce);
-
-    try sendPlainMsg(w.buffered());
-    stage = .req_pq_sent;
+    const req = try ak.start(&req_buf);
+    try sendPlainMsg(req);
     setStatus("req_pq_multi sent...");
 }
 
@@ -285,169 +295,49 @@ fn handleMtprotoFrame(frame: []const u8) !void {
         if (20 + payload_len > frame.len) return;
         const payload = frame[20 .. 20 + payload_len];
         if (payload.len < 4) return;
-        const cid = std.mem.readInt(u32, payload[0..4], .little);
 
-        switch (stage) {
-            .req_pq_sent => {
-                if (cid != 0x05162463) return; // resPQ
-                setStatus("resPQ received, factoring PQ & preparing RSA payload...");
-                var r: std.Io.Reader = .fixed(payload[4..]);
-                var nonce_echo: [16]u8 = undefined;
-                try r.readSliceAll(&nonce_echo);
-                try r.readSliceAll(&server_nonce);
-                const pq_bytes = try de.bytes(&r, allocator);
-                defer allocator.free(pq_bytes);
-                var pq: u64 = 0;
-                for (pq_bytes) |b| pq = pq * 256 + b;
-
-                const factors = factorPQ(pq);
-                var p_bytes: [4]u8 = undefined;
-                var q_bytes: [4]u8 = undefined;
-                std.mem.writeInt(u32, &p_bytes, factors.p, .big);
-                std.mem.writeInt(u32, &q_bytes, factors.q, .big);
-                fillRandom(&new_nonce);
-
-                var inner_buf: [256]u8 = undefined;
-                var iw: std.Io.Writer = .fixed(&inner_buf);
-                try iw.writeInt(u32, 0x83c95aec, .little);
-                try ser.bytes(&iw, pq_bytes);
-                try ser.bytes(&iw, &p_bytes);
-                try ser.bytes(&iw, &q_bytes);
-                try iw.writeAll(&nonce);
-                try iw.writeAll(&server_nonce);
-                try iw.writeAll(&new_nonce);
-
-                const inner_data = iw.buffered();
-                const inner_hash = sha.sha1(inner_data);
-                var rsa_payload: [255]u8 = undefined;
-                @memcpy(rsa_payload[0..20], &inner_hash);
-                const copy_len = @min(inner_data.len, 235);
-                @memcpy(rsa_payload[20..][0..copy_len], inner_data[0..copy_len]);
-                fillRandom(rsa_payload[20 + copy_len ..]);
-
-                var encrypted_data: [256]u8 = undefined;
-                try rsa.rsaEncrypt(&encrypted_data, &rsa_payload, serverKeyN[0..256], allocator);
-
-                var req2_buf: [512]u8 = undefined;
-                var w2: std.Io.Writer = .fixed(&req2_buf);
-                try w2.writeInt(u32, 0xd712e4be, .little); // req_DH_params
-                try w2.writeAll(&nonce);
-                try w2.writeAll(&server_nonce);
-                try ser.bytes(&w2, &p_bytes);
-                try ser.bytes(&w2, &q_bytes);
-                try w2.writeInt(i64, serverKeyFp, .little);
-                try ser.bytes(&w2, &encrypted_data);
-
-                try sendPlainMsg(w2.buffered());
-                stage = .req_dh_sent;
-                setStatus("req_DH_params sent...");
+        // Drive the shared Sans-I/O handshake state machine with this response.
+        var out_buf: [512]u8 = undefined;
+        switch (try ak.step(payload, allocator, &out_buf)) {
+            .send => |next| {
+                try sendPlainMsg(next);
+                setStatus("DH handshake step sent...");
             },
-            .req_dh_sent => {
-                if (cid != 0xd0e8075c) return; // server_DH_params_ok
-                setStatus("server_DH_params_ok received, computing Diffie-Hellman shared key...");
-                var dhr: std.Io.Reader = .fixed(payload[4..]);
-                var skip16: [16]u8 = undefined;
-                try dhr.readSliceAll(&skip16);
-                try dhr.readSliceAll(&skip16);
-                const enc_answer = try de.bytes(&dhr, allocator);
-                defer allocator.free(enc_answer);
-
-                const sha1_ns = sha.sha1Cat(&.{ &new_nonce, &server_nonce });
-                const sha1_sn = sha.sha1Cat(&.{ &server_nonce, &new_nonce });
-                const sha1_nn = sha.sha1Cat(&.{ &new_nonce, &new_nonce });
-                @memcpy(tmp_key[0..20], &sha1_ns);
-                @memcpy(tmp_key[20..32], sha1_sn[0..12]);
-                @memcpy(tmp_iv[0..8], sha1_sn[12..20]);
-                @memcpy(tmp_iv[8..28], &sha1_nn);
-                @memcpy(tmp_iv[28..32], new_nonce[0..4]);
-
-                const answer_buf = try allocator.dupe(u8, enc_answer);
-                defer allocator.free(answer_buf);
-                aes_ige.decrypt(tmp_key, tmp_iv, answer_buf);
-
-                var ansr: std.Io.Reader = .fixed(answer_buf[20..]);
-                const inner_id = try ansr.takeInt(u32, .little);
-                if (inner_id != 0xb5890dba) return error.BadInnerData;
-                try ansr.discardAll(16);
-                try ansr.discardAll(16);
-                const dh_g = try ansr.takeInt(u32, .little);
-                const dh_prime_bytes = try de.bytes(&ansr, allocator);
-                defer allocator.free(dh_prime_bytes);
-                const g_a_bytes = try de.bytes(&ansr, allocator);
-                defer allocator.free(g_a_bytes);
-                const server_time = try ansr.takeInt(i32, .little);
-
-                var dh_prime: [256]u8 = undefined;
-                var g_a: [256]u8 = undefined;
-                @memset(&dh_prime, 0);
-                @memset(&g_a, 0);
-                if (dh_prime_bytes.len <= 256) @memcpy(dh_prime[256 - dh_prime_bytes.len ..], dh_prime_bytes);
-                if (g_a_bytes.len <= 256) @memcpy(g_a[256 - g_a_bytes.len ..], g_a_bytes);
-                var b_bytes: [256]u8 = undefined;
-                fillRandom(&b_bytes);
-
-                const dh_result = try dh.compute(.{ .dh_prime = dh_prime, .g = dh_g }, &g_a, &b_bytes, allocator);
-
-                var ci_data_buf: [320]u8 = undefined;
-                var ciw: std.Io.Writer = .fixed(&ci_data_buf);
-                try ciw.writeInt(u32, 0x6643b654, .little);
-                try ciw.writeAll(&nonce);
-                try ciw.writeAll(&server_nonce);
-                try ciw.writeInt(i64, 0, .little);
-                try ser.bytes(&ciw, &dh_result.g_b);
-                const ci_data = ciw.buffered();
-                const ci_hash = sha.sha1(ci_data);
-
-                const ci_total = 20 + ci_data.len;
-                const ci_padded_len = ((ci_total + 15) / 16) * 16;
-                var ci_padded_buf: [352]u8 = undefined;
-                const ci_padded = ci_padded_buf[0..ci_padded_len];
-                @memcpy(ci_padded[0..20], &ci_hash);
-                @memcpy(ci_padded[20..][0..ci_data.len], ci_data);
-                fillRandom(ci_padded[20 + ci_data.len ..]);
-                aes_ige.encrypt(tmp_key, tmp_iv, ci_padded);
-
-                var set_buf: [512]u8 = undefined;
-                var sw: std.Io.Writer = .fixed(&set_buf);
-                try sw.writeInt(u32, 0xf5045f1f, .little); // set_client_DH_params
-                try sw.writeAll(&nonce);
-                try sw.writeAll(&server_nonce);
-                try ser.bytes(&sw, ci_padded);
-
-                const auth_key_hash = sha.sha1(&dh_result.secret);
-                var auth_key_id: i64 = undefined;
-                @memcpy(std.mem.asBytes(&auth_key_id), auth_key_hash[12..20]);
-
-                var server_salt: i64 = undefined;
-                for (std.mem.asBytes(&server_salt), new_nonce[0..8], server_nonce[0..8]) |*o, a, b| o.* = a ^ b;
-
-                const local_s: i32 = @intCast(js_now_sec());
-                const time_offset: i64 = @intCast(server_time - local_s);
+            .done => |result| {
+                stage = .ready;
+                setStatus("DH Key Exchange complete! Auth Key established.");
+                log("DH Key Exchange SUCCESS! Ready for MTProto 2.0 Encrypted RPCs.");
 
                 if (session) |*s| s.deinit(allocator);
-                session = Session.init(dh_result.secret, auth_key_id, server_salt, wasm_entropy);
-                session.?.time_offset = time_offset;
+                session = Session.init(result.auth_key, result.auth_key_id, result.server_salt, wasm_entropy);
+                session.?.time_offset = result.time_offset;
 
-                try sendPlainMsg(sw.buffered());
-                stage = .set_client_dh_sent;
-                setStatus("set_client_DH_params sent...");
+                js_on_session_ready();
+                if (bot_token_len > 0) {
+                    try authWithBotToken();
+                } else {
+                    setStatus("Exporting Login Token...");
+                    try exportLoginQr();
+                }
             },
-            .set_client_dh_sent => {
-                if (cid != 0x3bcbf734) return; // dh_gen_ok
-                stage = .ready;
-                setStatus("DH Key Exchange complete! Auth Key established. Exporting Login Token...");
-                log("DH Key Exchange SUCCESS! Ready for MTProto 2.0 Encrypted RPCs.");
-                try exportLoginQr();
-            },
-            else => {},
         }
         return;
     }
 
     // Handle encrypted frames
     if (session) |*s| {
-        const decrypted = s.decrypt(frame, allocator) catch {
-            log("Decrypt error on incoming frame");
+        const decrypted = s.decrypt(frame, allocator) catch |e| {
+            // diagnostics: distinguish wrong-key from framing errors
+            if (frame.len >= 8) {
+                const frame_key_id = std.mem.readInt(i64, frame[0..8], .little);
+                var dbg_buf: [160]u8 = undefined;
+                const dbg = std.fmt.bufPrint(&dbg_buf, "Decrypt error {s}: frame_key_id={x} local={x} flen={d}", .{
+                    @errorName(e), frame_key_id, s.auth_key_id, frame.len,
+                }) catch "Decrypt error";
+                log(dbg);
+            } else {
+                log("Decrypt error: short frame");
+            }
             return;
         };
         // payload borrows session.decrypt_scratch — consumed synchronously here.
@@ -502,6 +392,29 @@ fn exportLoginQr() !void {
     setStatus("auth.exportLoginToken sent, awaiting login token...");
 }
 
+/// Bot login: after DH, send auth.importBotAuthorization with the token.
+fn authWithBotToken() !void {
+    if (session == null or stage != .ready) return;
+    const req = functions.auth.ImportBotAuthorization{
+        .flags = 0,
+        .api_id = api_id,
+        .api_hash = api_hash_buf[0..api_hash_len],
+        .bot_auth_token = bot_token_buf[0..bot_token_len],
+    };
+    const req_bytes = try codec.encodeAlloc(req, allocator);
+    defer allocator.free(req_bytes);
+
+    const wrapped = try wrapInit(allocator, api_id, req_bytes);
+    defer allocator.free(wrapped);
+
+    const enc = try session.?.encrypt(wrapped, allocator, true);
+    defer allocator.free(enc.data);
+
+    try sendEncryptedMsg(enc.data);
+    setStatus("auth.importBotAuthorization sent, awaiting auth...");
+    log("auth.importBotAuthorization sent");
+}
+
 fn handleEncryptedPayload(payload: []const u8) !void {
     if (payload.len < 4) return;
     const cid = std.mem.readInt(u32, payload[0..4], .little);
@@ -519,6 +432,14 @@ fn handleEncryptedPayload(payload: []const u8) !void {
             const msg = std.fmt.bufPrint(&err_buf, "RPC Error {d}: {s}", .{ err.code, err.name() }) catch "RPC Error";
             log(msg);
             setStatus(msg);
+
+            // DC migration: the account lives on another datacenter. Hand the
+            // target dc_id to the host so it can reconnect there (new WebSocket
+            // + fresh DH handshake; auth key is per-DC so it must be re-created).
+            if (err.migrateDc()) |dc_id| {
+                log("DC migration requested");
+                js_on_migrate(dc_id);
+            }
             return;
         }
 
@@ -547,6 +468,14 @@ fn handleEncryptedPayload(payload: []const u8) !void {
         if (inner_cid == 0x390d5f5e) {
             setStatus("Login Successful! Authorized!");
             log("auth.loginTokenSuccess received! Authenticated!");
+            js_on_login_success(1);
+            return;
+        }
+
+        // auth.Authorization (0x2ea2c0d4) — bot login succeeded
+        if (inner_cid == 0x2ea2c0d4) {
+            setStatus("Bot login successful! Authorized!");
+            log("auth.importBotAuthorization succeeded!");
             js_on_login_success(1);
             return;
         }

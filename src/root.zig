@@ -26,6 +26,7 @@ pub const Msg = @import("Msg.zig");
 pub const State = @import("State.zig");
 pub const PeerCache = State.PeerCache;
 pub const Session = @import("mtproto/Session.zig");
+pub const auth_key = @import("mtproto/auth_key.zig");
 
 pub const crypto = @import("crypto.zig");
 pub const ws = @import("ws/Transport.zig");

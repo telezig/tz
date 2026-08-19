@@ -136,12 +136,16 @@ function loadHistory(peerId) {
 
 async function init() {
   // 1) sqlite store (tz-db.wasm) over real OPFS
+  postLog('init: OPFS root...');
   const root = await navigator.storage.getDirectory();
   const opfs = new OpfsBackend(root);
+  postLog('init: preload db files...');
   await opfs.preload('sdk_store.db', true);
   await opfs.preload('sdk_store.db-journal', true);
 
+  postLog('init: fetch tz-db.wasm...');
   const dbResp = await fetch('tz-db.wasm');
+  if (!dbResp.ok) throw new Error('fetch tz-db.wasm: HTTP ' + dbResp.status);
   const dbBytes = await dbResp.arrayBuffer();
   const dec = new TextDecoder();
   const dbImports = { env: {
@@ -157,9 +161,11 @@ async function init() {
     js_opfs_random: (p, l) => crypto.getRandomValues(new Uint8Array(dbMemory.buffer, p, l)),
     js_now_ms: () => BigInt(Math.floor(performance.now())),
   }};
+  postLog('init: instantiate tz-db.wasm...');
   const dbMod = await WebAssembly.instantiate(dbBytes, dbImports);
   wasmDb = dbMod.instance.exports;
   dbMemory = wasmDb.memory;
+  postLog('init: sqlite3_os_init...');
   if (typeof wasmDb.sqlite3_os_init === 'function') wasmDb.sqlite3_os_init();
 
   const [dp, dl] = dbStr('sdk_store.db');
@@ -176,7 +182,9 @@ async function init() {
   postLog('sqlite store ready on OPFS');
 
   // 2) MTProto engine (tz.wasm)
+  postLog('init: fetch tz.wasm...');
   const mtpResp = await fetch('tz.wasm');
+  if (!mtpResp.ok) throw new Error('fetch tz.wasm: HTTP ' + mtpResp.status);
   const mtpBytes = await mtpResp.arrayBuffer();
   const mtpImports = { env: {
     js_log: (p, l) => { postLog('[wasm] ' + dec.decode(new Uint8Array(mtpMemory.buffer, p, l))); },
@@ -206,6 +214,28 @@ async function init() {
         postLog('[store] failed: ' + e.message);
       }
     },
+    js_on_migrate: (dcId) => {
+      postLog('[migrate] switching to DC' + dcId);
+      openSocket(dcId, true); // migrate: always fresh handshake
+    },
+    js_on_session_ready: () => {
+      // Persist the fresh auth key so future loads skip the DH handshake.
+      // Keyed by the current dc (auth key is per-DC).
+      try {
+        const sz = mtp.tz_export_session(0, 0);
+        const buf = mtp.tz_alloc(sz || 280);
+        const n = mtp.tz_export_session(buf, sz || 280);
+        if (n > 0) {
+          const blob = new Uint8Array(mtpMemory.buffer, buf, n).slice();
+          const storedDc = n > 272 ? blob[272] : 0;
+          mtp.tz_free(buf, n);
+          idbSaveSession(blob, storedDc).then(() => postLog(`[session] saved to IndexedDB (dc${storedDc})`), (e) => postLog('[session] save failed: ' + e.message));
+          idbSaveHomeDc(storedDc).catch(() => {});
+        }
+      } catch (e) {
+        postLog('[session] export failed: ' + e.message);
+      }
+    },
   }};
   const mtpMod = await WebAssembly.instantiate(mtpBytes, mtpImports);
   mtp = mtpMod.instance.exports;
@@ -215,26 +245,121 @@ async function init() {
 }
 
 let ws = null;
+let engineCfg = null; // { apiId, apiHash, botToken }
+let sessionKey = 'tz_session'; // IndexedDB key for persisted session
 
-function connect(dcUrl, apiId, apiHash) {
-  if (ws) { ws.close(); ws = null; }
-  // init engine
-  const hashBytes = new TextEncoder().encode(apiHash);
+// --- IndexedDB session persistence (Tier-1 storage) ---
+// Sessions are per-DC (auth key is per-DC), so blobs are keyed by dc id.
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('tz-web', 1);
+    req.onupgradeneeded = () => {
+      const d = req.result;
+      if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+function idbSaveSession(bytes, dcId) {
+  const key = 'tz_session_dc' + Math.abs(dcId);
+  return idbOpen().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction('kv', 'readwrite');
+    tx.objectStore('kv').put(bytes, key);
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+  }));
+}
+function idbLoadSession(dcId) {
+  const key = 'tz_session_dc' + Math.abs(dcId);
+  return idbOpen().then((db) => new Promise((resolve, reject) => {
+    const req = db.transaction('kv', 'readonly').objectStore('kv').get(key);
+    req.onsuccess = () => { db.close(); resolve(req.result || null); };
+    req.onerror = () => { db.close(); reject(req.error); };
+  }));
+}
+// Home DC: the DC the account actually lives on (per USER_MIGRATE). Storing it
+// lets us connect straight to the right DC on the next load instead of probing
+// DC2 and migrating again. Mirrors native SessionData.is_home.
+function idbSaveHomeDc(dcId) {
+  return idbOpen().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction('kv', 'readwrite');
+    tx.objectStore('kv').put(Math.abs(dcId), 'tz_home_dc');
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+  }));
+}
+function idbLoadHomeDc() {
+  return idbOpen().then((db) => new Promise((resolve, reject) => {
+    const req = db.transaction('kv', 'readonly').objectStore('kv').get('tz_home_dc');
+    req.onsuccess = () => { db.close(); resolve(req.result || null); };
+    req.onerror = () => { db.close(); reject(req.error); };
+  }));
+}
+
+// Standard Telegram web DC endpoints. dc_id negative => test server.
+const DC_URLS = {
+  1: 'wss://pluto.web.telegram.org/apiws',
+  2: 'wss://venus.web.telegram.org/apiws',
+  3: 'wss://aurora.web.telegram.org/apiws',
+  4: 'wss://vesta.web.telegram.org/apiws',
+  5: 'wss://flora.web.telegram.org/apiws',
+  '-1': 'wss://pluto.web.telegram.org/apiws_test',
+  '-2': 'wss://venus.web.telegram.org/apiws_test',
+  '-3': 'wss://aurora.web.telegram.org/apiws_test',
+  '-4': 'wss://vesta.web.telegram.org/apiws_test',
+  '-5': 'wss://flora.web.telegram.org/apiws_test',
+};
+
+function initEngine() {
+  const enc = new TextEncoder();
+  const hashBytes = enc.encode(engineCfg.apiHash);
   const hp = mtp.tz_alloc(hashBytes.length);
   new Uint8Array(mtpMemory.buffer, hp, hashBytes.length).set(hashBytes);
-  mtp.tz_init(apiId, hp, hashBytes.length);
+  mtp.tz_init(engineCfg.apiId, hp, hashBytes.length);
   mtp.tz_free(hp, hashBytes.length);
+  if (engineCfg.botToken) {
+    const tb = enc.encode(engineCfg.botToken);
+    const tp = mtp.tz_alloc(tb.length);
+    new Uint8Array(mtpMemory.buffer, tp, tb.length).set(tb);
+    mtp.tz_set_bot_token(tp, tb.length);
+    mtp.tz_free(tp, tb.length);
+    postLog('[auth] bot token set');
+  }
+}
 
-  let dcId = 2;
-  if (dcUrl.includes('pluto')) dcId = 1;
-  else if (dcUrl.includes('venus')) dcId = 2;
-  else if (dcUrl.includes('aurora')) dcId = 3;
-  else if (dcUrl.includes('vesta')) dcId = 4;
-  else if (dcUrl.includes('flora')) dcId = 5;
-  if (dcUrl.includes('_test')) dcId = -dcId;
+async function openSocket(dcId, isMigrate) {
+  if (ws) { try { ws.close(); } catch (e) {} ws = null; }
+  // Reset engine state (session/auth key cleared, stage -> idle, transport
+  // reset). Auth key is per-DC, so migrate re-runs the whole handshake.
+  if (typeof mtp.tz_reset === 'function') mtp.tz_reset();
+  initEngine();
   mtp.tz_set_dc_id(dcId);
 
-  ws = new WebSocket(dcUrl, ['binary']);
+  // Restore a persisted session for THIS dc — skip the DH handshake. On
+  // migrate the current key is provably wrong, so always do a fresh handshake.
+  let restored = false;
+  if (!isMigrate) {
+    try {
+      const saved = await idbLoadSession(dcId);
+      if (saved && saved.byteLength > 0) {
+        // SessionData layout: auth_key[256] auth_key_id[8] server_salt[8] dc_id[1]...
+        const storedDc = saved.byteLength > 272 ? saved[272] : -1;
+        postLog(`[session] stored blob dc=${storedDc} len=${saved.byteLength}`);
+        const sp = mtp.tz_alloc(saved.byteLength);
+        new Uint8Array(mtpMemory.buffer, sp, saved.byteLength).set(saved);
+        restored = mtp.tz_import_session(sp, saved.byteLength) === 1;
+        mtp.tz_free(sp, saved.byteLength);
+      }
+    } catch (e) {
+      postLog('[session] load failed: ' + e.message);
+    }
+  }
+  postLog(restored ? '[session] restored — skipping DH' : isMigrate ? '[session] migrate — fresh handshake' : '[session] none — full handshake');
+
+  const url = DC_URLS[String(dcId)] || DC_URLS['2'];
+  postLog(`[ws] connecting DC${dcId} ${url}`);
+  ws = new WebSocket(url, ['binary']);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => { postLog('[ws] open'); mtp.tz_ws_open(); };
   ws.onmessage = (ev) => {
@@ -248,13 +373,39 @@ function connect(dcUrl, apiId, apiHash) {
   ws.onclose = () => postLog('[ws] closed');
 }
 
+function connect(dcUrl, apiId, apiHash, botToken) {
+  engineCfg = { apiId, apiHash, botToken };
+  let dcId = 2;
+  if (dcUrl.includes('pluto')) dcId = 1;
+  else if (dcUrl.includes('venus')) dcId = 2;
+  else if (dcUrl.includes('aurora')) dcId = 3;
+  else if (dcUrl.includes('vesta')) dcId = 4;
+  else if (dcUrl.includes('flora')) dcId = 5;
+  if (dcUrl.includes('_test')) dcId = -dcId;
+
+  // If we already know the account's home DC (persisted after login), go
+  // straight there — no DC2 probe + migrate on every load.
+  idbLoadHomeDc().then((homeDc) => {
+    if (homeDc && homeDc > 0) {
+      const signed = dcId < 0 ? -homeDc : homeDc; // preserve test-server sign
+      postLog(`[home] known DC${homeDc} — connecting directly`);
+      openSocket(signed, false).catch((e) => postLog('[ws] open failed: ' + e.message));
+    } else {
+      openSocket(dcId, false).catch((e) => postLog('[ws] open failed: ' + e.message));
+    }
+  }).catch(() => {
+    openSocket(dcId, false).catch((e) => postLog('[ws] open failed: ' + e.message));
+  });
+}
+
 self.onmessage = (e) => {
   if (e.data.type === 'init') {
-    init().then(() => {}, (err) => self.postMessage({ type: 'error', message: err.message }));
+    postLog = (msg) => self.postMessage({ type: 'log', msg });
+    init().then(() => {}, (err) => self.postMessage({ type: 'error', message: err.message, stack: err.stack }));
     return;
   }
   if (e.data.type === 'connect') {
-    try { connect(e.data.dcUrl, e.data.apiId, e.data.apiHash); }
+    try { connect(e.data.dcUrl, e.data.apiId, e.data.apiHash, e.data.botToken || null); }
     catch (err) { self.postMessage({ type: 'error', message: err.message }); }
     return;
   }
