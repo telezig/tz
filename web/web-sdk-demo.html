@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>tz — Web SDK Demo (MTProto → SQLite on OPFS)</title>
+  <style>
+    :root {
+      --bg: #0f172a; --card-bg: #1e293b; --accent: #38bdf8; --text: #f8fafc;
+      --text-muted: #94a3b8; --border: #334155; --success: #4ade80; --fail: #f87171;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background: var(--bg); color: var(--text); padding: 2rem; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+    .container { width: 100%; max-width: 820px; }
+    header { margin-bottom: 1.5rem; text-align: center; }
+    h1 { font-size: 1.8rem; font-weight: 800; color: var(--accent); }
+    .subtitle { color: var(--text-muted); font-size: 0.95rem; margin-top: 0.3rem; }
+    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 1.2rem; margin-bottom: 1.2rem; }
+    .row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
+    input, select { background: #0f172a; border: 1px solid var(--border); border-radius: 6px; padding: 0.55rem 0.8rem; color: var(--text); font-size: 0.9rem; }
+    input[type=number] { width: 130px; }
+    button { background: var(--accent); color: #0f172a; border: none; border-radius: 6px; padding: 0.55rem 1.2rem; font-weight: 700; cursor: pointer; }
+    button:hover { background: #0ea5e9; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status { margin-top: 0.6rem; font-size: 0.85rem; color: var(--text-muted); }
+    .pass { color: var(--success); font-weight: 700; }
+    .fail { color: var(--fail); font-weight: 700; }
+    .badge { font-size: 0.72rem; background: rgba(56,189,248,0.15); color: var(--accent); padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+    #qr { text-align: center; margin: 0.8rem 0; }
+    #qr-url { font-family: monospace; font-size: 0.75rem; word-break: break-all; background: #0f172a; padding: 0.6rem; border-radius: 6px; border: 1px solid var(--border); }
+    .log-panel { background: #090d16; border: 1px solid var(--border); border-radius: 8px; padding: 0.8rem; height: 180px; overflow-y: auto; font-family: monospace; font-size: 0.78rem; color: #cbd5e1; }
+    .log-entry { margin-bottom: 0.2rem; }
+    #history { max-height: 300px; overflow-y: auto; }
+    .msg { background: #0f172a; border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.8rem; margin-bottom: 0.4rem; font-size: 0.88rem; }
+    .msg .meta { color: var(--text-muted); font-size: 0.72rem; font-family: monospace; }
+    .msg .body { margin-top: 0.2rem; word-break: break-word; }
+    .hint { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Web SDK Demo <span class="badge">MTProto → SQLite on OPFS</span></h1>
+      <p class="subtitle">Login with QR → real messages auto-store into OPFS sqlite → reload survives</p>
+    </header>
+
+    <div class="card">
+      <div class="row">
+        <input type="number" id="api-id" placeholder="API ID" value="611335" />
+        <input type="text" id="api-hash" placeholder="API Hash" value="d524b414d21f4d37f08684c1df41ac9c" style="flex:1; min-width: 200px;" />
+        <select id="dc">
+          <option value="wss://venus.web.telegram.org/apiws">DC2 prod</option>
+          <option value="wss://venus.web.telegram.org/apiws_test">DC2 test</option>
+        </select>
+        <button id="connect">Connect</button>
+      </div>
+      <div class="row" style="margin-top: 0.6rem;">
+        <input type="text" id="bot-token" placeholder="Bot token (leave empty for QR user login)" style="flex:1; min-width: 200px;" />
+        <span class="hint">token set → bot login; empty → QR</span>
+      </div>
+      <div id="qr"></div>
+      <div class="status" id="status">initializing...</div>
+    </div>
+
+    <div class="card">
+      <h3 style="font-size: 1rem; color: var(--text-muted); margin-bottom: 0.6rem;">Stored messages</h3>
+      <div class="row" style="margin-bottom: 0.6rem;">
+        <input type="number" id="peer-filter" placeholder="peer id (0 = all)" value="0" style="width: 160px;" />
+        <button id="refresh">Refresh history</button>
+      </div>
+      <div id="history"><div class="hint">messages received after login appear here and persist in OPFS</div></div>
+    </div>
+
+    <div class="card">
+      <h3 style="font-size: 1rem; color: var(--text-muted); margin-bottom: 0.4rem;">Log</h3>
+      <div class="log-panel" id="log"></div>
+    </div>
+  </div>
+
+  <script>
+    const logEl = document.getElementById('log');
+    const statusEl = document.getElementById('status');
+    const qrEl = document.getElementById('qr');
+    const historyEl = document.getElementById('history');
+
+    let worker = null;
+
+    function log(msg) {
+      const d = document.createElement('div');
+      d.className = 'log-entry';
+      d.textContent = '[' + new Date().toISOString().split('T')[1].slice(0, 12) + '] ' + msg;
+      logEl.appendChild(d);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    function status(txt, cls) {
+      statusEl.textContent = txt;
+      statusEl.className = 'status' + (cls ? ' ' + cls : '');
+    }
+    function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+    function renderHistory(rows) {
+      historyEl.innerHTML = '';
+      if (!rows || rows.length === 0) { historyEl.innerHTML = '<div class="hint">no stored messages</div>'; return; }
+      for (const r of rows) {
+        const d = document.createElement('div');
+        d.className = 'msg';
+        d.innerHTML = `
+          <div class="meta">#${r.id} · peer ${r.peerId} · ${new Date(Number(r.date)*1000).toISOString()} · ${r.out ? 'out' : 'in'}</div>
+          <div class="body">${esc(r.text)}</div>`;
+        historyEl.appendChild(d);
+      }
+      status(`showing ${rows.length} stored messages`, 'pass');
+    }
+
+    function boot() {
+      worker = new Worker('web-sdk-demo-worker.js');
+      worker.onmessage = (e) => {
+        switch (e.data.type) {
+          case 'log': log(e.data.msg); break;
+          case 'ready': status('ready — engine + store loaded. Set API creds and Connect.', 'pass'); break;
+          case 'qr':
+            qrEl.innerHTML = '<div id="qr-url">' + esc(e.data.url) + '</div>';
+            status('Scan QR with Telegram → Devices → Link Desktop Device');
+            break;
+          case 'login': status('LOGGED IN — messages will auto-store', 'pass'); qrEl.innerHTML = ''; break;
+          case 'stored': log('[stored] peer=' + e.data.peerId + ': ' + e.data.text.slice(0, 80)); break;
+          case 'history': renderHistory(e.data.rows); break;
+          case 'error': status('error: ' + e.data.message, 'fail'); log('ERROR: ' + e.data.message); break;
+        }
+      };
+      worker.onerror = (e) => status('worker error: ' + e.message, 'fail');
+      worker.postMessage({ type: 'init' });
+    }
+
+    document.getElementById('connect').addEventListener('click', () => {
+      const apiId = parseInt(document.getElementById('api-id').value) || 611335;
+      const apiHash = document.getElementById('api-hash').value || 'd524b414d21f4d37f08684c1df41ac9c';
+      const dcUrl = document.getElementById('dc').value;
+      const botToken = document.getElementById('bot-token').value.trim() || null;
+      qrEl.innerHTML = '';
+      worker.postMessage({ type: 'connect', dcUrl, apiId, apiHash, botToken });
+    });
+
+    document.getElementById('refresh').addEventListener('click', () => {
+      const peerId = parseInt(document.getElementById('peer-filter').value) || 0;
+      worker.postMessage({ type: 'history', peerId });
+    });
+
+    boot();
+  </script>
+</body>
+</html>

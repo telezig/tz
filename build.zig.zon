@@ -3,7 +3,12 @@
     .version = "0.0.3",
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0xba5a362f735cedcc,
-    .dependencies = .{},
+    .dependencies = .{
+        .sqlite = .{
+            .url = "https://www.sqlite.org/2024/sqlite-amalgamation-3450300.zip",
+            .hash = "N-V-__8AAMgKogCD0BH1L1DIipuQC7CJ-0LciruJ0raJy4Ih",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

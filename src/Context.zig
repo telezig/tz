@@ -7,6 +7,7 @@ const types = @import("types");
 const unions = @import("unions");
 const functions = @import("functions");
 const State = @import("State.zig");
+const Store = @import("store");
 
 client: *anyopaque,
 io: Io,
@@ -16,6 +17,9 @@ api_hash: []const u8,
 entities: Entities,
 peer_cache: *State.PeerCache,
 mb_mutex: *std.Io.Mutex,
+/// Message-history persistence backend (same instance as ClientOptions.store).
+/// Handlers can read/write history through it; null when no store configured.
+store: ?Store = null,
 callFn: *const fn (client: *anyopaque, io: Io, bytes: []const u8) anyerror![]u8,
 /// Like callFn but routes FILE_MIGRATE to a sub-connection automatically.
 callFileFn: *const fn (client: *anyopaque, io: Io, bytes: []const u8) anyerror![]u8,

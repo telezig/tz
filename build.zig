@@ -50,6 +50,16 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // --- Core tz module: pure Zig, no sqlite, no libc.
+    // Storage/Store backends (e.g. sqlite) are injected at the call site, so
+    // consumers who don't need persistence never pull in sqlite3.c.
+    // `store` is the shared Store vtable module (also imported by tz_db).
+    const store_module = b.createModule(.{
+        .root_source_file = b.path("src/Store.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const mod = b.addModule("tz", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -59,6 +69,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "types", .module = types_module },
             .{ .name = "unions", .module = unions_module },
             .{ .name = "functions", .module = functions_module },
+            .{ .name = "store", .module = store_module },
         },
     });
 
@@ -72,8 +83,51 @@ pub fn build(b: *std.Build) void {
         .install_subdir = "docs",
     }).step);
 
+    // --- SQLite dependency & flags (shared by native and wasm backends) ---
+    const sqlite_dep = b.dependency("sqlite", .{});
+
+    const base_sqlite_flags = &[_][]const u8{
+        "-std=c99",
+        "-DSQLITE_DQS=0",
+        "-DSQLITE_DEFAULT_MEMSTATUS=0",
+        "-DSQLITE_ENABLE_FTS5=1",
+        "-DSQLITE_OMIT_DEPRECATED=1",
+        "-DSQLITE_OMIT_PROGRESS_CALLBACK=1",
+        "-DSQLITE_OMIT_LOAD_EXTENSION=1",
+        "-DSQLITE_TEMP_STORE=3",
+        "-DSQLITE_OMIT_JSON=1",
+        "-DSQLITE_OMIT_DATETIME_FUNCS=1",
+        "-DNDEBUG=1",
+    };
+
+    const native_sqlite_flags = base_sqlite_flags ++ &[_][]const u8{
+        "-DSQLITE_THREADSAFE=1",
+    };
+
+    const wasm_sqlite_flags = base_sqlite_flags ++ &[_][]const u8{
+        "-DSQLITE_OS_OTHER=1",
+        "-DSQLITE_THREADSAFE=0",
+        "-DSQLITE_OMIT_WAL=1",
+    };
+
+    // --- Native sqlite backend module (optional; consumers import "tz_db").
+    // Used by CLI/desktop builds that want local message history, or by tests.
+    // `store` is wired to the core Store vtable (same file both sides use).
+    const db_mod = b.addModule("tz_db", .{
+        .root_source_file = b.path("src/db.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    db_mod.addImport("store", store_module);
+    db_mod.addCSourceFile(.{
+        .file = sqlite_dep.path("sqlite3.c"),
+        .flags = native_sqlite_flags,
+    });
+    db_mod.addIncludePath(sqlite_dep.path(""));
+    db_mod.link_libc = true;
+
     const test_step = b.step("test", "Run tests");
-    for (&[_]*std.Build.Module{ mod, codec_module }) |m|
+    for (&[_]*std.Build.Module{ mod, codec_module, db_mod }) |m|
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
 
     const examples = &[_]struct { name: []const u8, extra_imports: []const std.Build.Module.Import }{
@@ -82,6 +136,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "feature_demo", .extra_imports = &.{} },
         .{ .name = "user_login", .extra_imports = &.{.{ .name = "functions", .module = functions_module }} },
         .{ .name = "qr_login", .extra_imports = &.{} },
+        .{ .name = "bot_store", .extra_imports = &.{.{ .name = "tz_db", .module = db_mod }} },
     };
     for (examples) |ex| {
         const imports = b.allocator.alloc(std.Build.Module.Import, 1 + ex.extra_imports.len) catch @panic("oom");
@@ -109,4 +164,124 @@ pub fn build(b: *std.Build) void {
     }) |pair| {
         update_schema.dependOn(&b.addSystemCommand(&.{ "curl", "-fsSL", pair[0], "-o", pair[1] }).step);
     }
+
+    // --- WebAssembly Target ---
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+
+    // --- SQLite WASM backend (src/db/wasm_db.zig): sqlite3.c compiled for
+    // wasm32-freestanding with SQLITE_OS_OTHER, OPFS VFS, and a libc shim.
+    const wasm_db_mod = b.createModule(.{
+        .root_source_file = b.path("src/db/wasm_db.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+    });
+    wasm_db_mod.addCSourceFile(.{
+        .file = sqlite_dep.path("sqlite3.c"),
+        .flags = wasm_sqlite_flags,
+    });
+    wasm_db_mod.addIncludePath(sqlite_dep.path(""));
+    // wasm32-freestanding ships no libc headers; sqlite3.c needs stubs.
+    wasm_db_mod.addIncludePath(b.path("src/db/wasm_headers"));
+
+    const wasm_db_exe = b.addExecutable(.{
+        .name = "tz-db",
+        .root_module = wasm_db_mod,
+    });
+    wasm_db_exe.entry = .disabled;
+    wasm_db_exe.rdynamic = true;
+
+    const wasm_db_install = b.addInstallArtifact(wasm_db_exe, .{
+        .dest_dir = .{ .override = .{ .custom = "web" } },
+    });
+    const install_db_bench_html = b.addInstallFileWithDir(b.path("web/db-bench.html"), .{ .custom = "web" }, "db-bench.html");
+    const install_db_bench_worker = b.addInstallFileWithDir(b.path("web/db-bench-worker.js"), .{ .custom = "web" }, "db-bench-worker.js");
+    const install_store_demo_html = b.addInstallFileWithDir(b.path("web/store-demo.html"), .{ .custom = "web" }, "store-demo.html");
+    const install_store_demo_worker = b.addInstallFileWithDir(b.path("web/store-demo-worker.js"), .{ .custom = "web" }, "store-demo-worker.js");
+    const install_sdk_demo_html = b.addInstallFileWithDir(b.path("web/web-sdk-demo.html"), .{ .custom = "web" }, "web-sdk-demo.html");
+    const install_sdk_demo_worker = b.addInstallFileWithDir(b.path("web/web-sdk-demo-worker.js"), .{ .custom = "web" }, "web-sdk-demo-worker.js");
+
+    const wasm_db_step = b.step("wasm-db", "Build SQLite WASM + OPFS benchmark (zig-out/web/tz-db.wasm)");
+    wasm_db_step.dependOn(&wasm_db_install.step);
+    wasm_db_step.dependOn(&install_db_bench_html.step);
+    wasm_db_step.dependOn(&install_db_bench_worker.step);
+    wasm_db_step.dependOn(&install_store_demo_html.step);
+    wasm_db_step.dependOn(&install_store_demo_worker.step);
+    wasm_db_step.dependOn(&install_sdk_demo_html.step);
+    wasm_db_step.dependOn(&install_sdk_demo_worker.step);
+
+    // --- MTProto WASM demo (existing; independent of sqlite) ---
+    const wasm_codec_module = b.createModule(.{
+        .root_source_file = b.path("src/tl/codec.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+    });
+
+    const wasm_types_module = b.createModule(.{
+        .root_source_file = gen_dir.path(b, "types.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "codec", .module = wasm_codec_module }},
+    });
+    const wasm_unions_module = b.createModule(.{
+        .root_source_file = gen_dir.path(b, "unions.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "types", .module = wasm_types_module }},
+    });
+    wasm_types_module.addImport("unions", wasm_unions_module);
+
+    const wasm_functions_module = b.createModule(.{
+        .root_source_file = gen_dir.path(b, "functions.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "codec", .module = wasm_codec_module },
+            .{ .name = "types", .module = wasm_types_module },
+            .{ .name = "unions", .module = wasm_unions_module },
+        },
+    });
+
+    const wasm_tz_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "codec", .module = wasm_codec_module },
+            .{ .name = "types", .module = wasm_types_module },
+            .{ .name = "unions", .module = wasm_unions_module },
+            .{ .name = "functions", .module = wasm_functions_module },
+        },
+    });
+
+    const wasm_exe = b.addExecutable(.{
+        .name = "tz",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wasm.zig"),
+            .target = wasm_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "tz", .module = wasm_tz_mod },
+                .{ .name = "codec", .module = wasm_codec_module },
+                .{ .name = "types", .module = wasm_types_module },
+                .{ .name = "unions", .module = wasm_unions_module },
+                .{ .name = "functions", .module = wasm_functions_module },
+            },
+        }),
+    });
+    wasm_exe.entry = .disabled;
+    wasm_exe.rdynamic = true;
+
+    const wasm_install = b.addInstallArtifact(wasm_exe, .{
+        .dest_dir = .{ .override = .{ .custom = "web" } },
+    });
+    const install_web_html = b.addInstallFileWithDir(b.path("web/index.html"), .{ .custom = "web" }, "index.html");
+    const install_web_js = b.addInstallFileWithDir(b.path("web/tz-ws.js"), .{ .custom = "web" }, "tz-ws.js");
+
+    const wasm_step = b.step("wasm", "Build WebAssembly binary and demo (zig-out/web/)");
+    wasm_step.dependOn(&wasm_install.step);
+    wasm_step.dependOn(&install_web_html.step);
+    wasm_step.dependOn(&install_web_js.step);
 }
